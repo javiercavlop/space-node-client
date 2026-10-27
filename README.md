@@ -81,13 +81,15 @@ console.log(result.eval); // true/false
 ### SpaceClient
 
 - `connect({ url, apiKey, organizationId? })` — Connects to the SPACE server and returns a `SpaceClient` instance. `organizationId` is only needed for member user keys (`usr_...`) and is sent with the `/contracts` events handshake.
-- `SpaceClient.contracts.addContract(contract)` — Adds a new contract.
+- `SpaceClient.contracts.addContract(contract, { idempotencyKey? })` — Adds a new contract. The request carries an `Idempotency-Key`.
 - `SpaceClient.contracts.updateContractSubscription(userId, subscription, { expectedContractVersion?, keepBillingPeriod?, rejectPrivate? })` — Updates a user's subscription (novation). On a SPACE that supports them (`X-Space-Capabilities` lists `contract-version` / `keep-billing-period` / `reject-private`): with `expectedContractVersion` the change only applies if nobody changed the contract meanwhile, otherwise it throws `ContractChangedError` (HTTP 412, or earlier if the contract read before the write already shows another version) carrying the current `contractVersion`; `keepBillingPeriod: true` keeps the current billing period instead of restarting it; `rejectPrivate: true` (opt-in, sent as `?rejectPrivate=true`) makes SPACE reject private plans and add-ons (`PRIVATE_PLAN` / `PRIVATE_ADDON`) instead of accepting them, which is what SPACE does by default. If the connected SPACE does not support a requested option, the call throws `SpaceFeatureUnsupportedError` (`capability`, `written: false`) and writes nothing; if the response shows the option was not honoured anyway (no `ETag`, or the billing period restarted), it throws `SpaceFeatureUnsupportedError` with `written: true` and the stored `contract`. Without options, the request is the same as before and no check is made.
 - `SpaceClient.contracts.previewNovation(userId, subscription, { keepBillingPeriod?, rejectPrivate? })` — Dry run of a novation: returns `{ valid, errors, effective, versionChanges, usageWarnings, billingPeriod, contractVersion }` and writes nothing. `contractedServices` may be omitted to let SPACE keep the versions or apply the SPHERE policy. With `keepBillingPeriod` or `rejectPrivate`, throws `SpaceFeatureUnsupportedError` if the SPACE that answered does not advertise `keep-billing-period` or `reject-private`.
 - `SpaceClient.contracts.getContract(userId)` fills `contractVersion` from the `ETag` header when the body lacks it.
+- `SpaceClient.hasCapability(token)` — Whether the connected SPACE advertises a token of `X-Space-Capabilities` (e.g. `idempotency-key`, `atomic-usage-limits`), from the capabilities of a recent response or, when there are none, from `GET /healthcheck`.
 - `SpaceClient.clearCapabilities()` — Forgets the cached `X-Space-Capabilities` (kept for 60 s per client), e.g. right after upgrading SPACE.
-- `SpaceClient.features.evaluate(userId, featureId, expectedConsumption?)` — Evaluates a feature for a user.
-- `SpaceClient.features.revertEvaluation(userId, featureId)` — Reverts the usage level update performed during a past evaluation. 
+- `SpaceClient.features.evaluate(userId, featureId, expectedConsumption?, { details?, server?, idempotencyKey? })` — Evaluates a feature for a user. With an expected consumption it consumes, and the result carries `consumptionId` (SPACE with `atomic-usage-limits`); the request carries an `Idempotency-Key` (see [Consumption, retries and Idempotency-Key](#consumption-retries-and-idempotency-key)).
+- `SpaceClient.features.revertConsumption(userId, featureId, consumptionId, { idempotencyKey? })` — Reverts exactly the consumption an evaluation reported as `consumptionId`. Resolves `true` when it is reverted (now or earlier; reverting twice changes nothing) and `false` when SPACE does not know it (404: unknown or expired id). Throws `SpaceFeatureUnsupportedError` (`capability: 'atomic-usage-limits'`) without writing on a SPACE that does not support it.
+- `SpaceClient.features.revertEvaluation(userId, featureId, revertToLatest?)` — **Deprecated**, use `revertConsumption`. Reverts the oldest (or, with `revertToLatest`, the newest) consumption of the feature made in the last two minutes, whichever it is.
 
   > [!WARNING]
   > This will only take effect if the evaluation was done less that 2 mins ago, so it's expected to be used as rollback in case of an error during request processing in the host app
@@ -154,6 +156,40 @@ try {
 
 > [!NOTE]
 > These endpoints need SPACE with the subscription-change API (`GET /contracts/{userId}/pricings`, `GET /services/{s}/pricings/{v}?format=yaml`, `GET /services/{s}/pricings/new-contracts`, `POST /contracts/{userId}/novation/preview`). Older SPACE versions answer 404 to them (`getYaml` throws `SpaceFeatureUnsupportedError`). The guarantees of `expectedContractVersion`, `keepBillingPeriod` and `rejectPrivate` hold only on a SPACE that advertises `contract-version`, `keep-billing-period` and `reject-private` in `X-Space-Capabilities`; against an older SPACE the client refuses those options with `SpaceFeatureUnsupportedError` instead of sending a novation the server would apply unconditionally (or with private plans accepted). `addContract` takes no options: `rejectPrivate` is not exposed for `POST /contracts` in this client.
+
+### Consumption, retries and Idempotency-Key
+
+Consumptions, reverts, contract creation (`addContract`) and novations (`updateContractSubscription`) are writes that must not be applied twice when a request is retried after a timeout or a dropped connection. Every such call sends an `Idempotency-Key` header. On a SPACE with the `idempotency-key` capability, a request repeated with the same key is answered with the stored outcome of the first one (`Idempotent-Replayed: true`) and applies nothing; an older SPACE ignores the header. Evaluations without a consumption and reads carry no key.
+
+- **Generated keys.** By default the client creates a random UUID v4 per call and keeps it for that call's own retries. That covers retries inside one process.
+- **Your own key.** When the operation may be retried after your process restarts (a job queue, an outbox, a webhook handler), create the key once, store it with the operation, and pass it on every attempt: `{ idempotencyKey }`. Use a new key for every new operation, and a new key after you correct a request that SPACE refused with a `4xx`. With a key of your own the client first checks that SPACE advertises `idempotency-key` and throws `SpaceFeatureUnsupportedError` (`written: false`) if it does not, since the guarantee you asked for would silently not hold.
+- **Retries** are off by default (`retries: 0`). With `retries: n` (0 to 10) the client retries those keyed writes, with the same key and the same request, after a network error, a `5xx` or a `409 IDEMPOTENCY_IN_PROGRESS` (another request with the key is still running), and only while SPACE advertises `idempotency-key`: without it each retry could be applied again. It waits `Retry-After` when SPACE sends one (and gives up if that is longer than `retryMaxDelayMs`), otherwise an exponential backoff with jitter from `retryBaseDelayMs` (250 ms) up to `retryMaxDelayMs` (10 s). Other `4xx` and writes without a key are never retried.
+- **Errors.** `IdempotencyConflictError` (`409 IDEMPOTENCY_CONFLICT`: the key was used for a different request), `IdempotencyInProgressError` (`409 IDEMPOTENCY_IN_PROGRESS` once the retries are spent; `retryAfter` in seconds; retry later with the same key) and `IdempotencyKeyInvalidError` (`400 IDEMPOTENCY_KEY_INVALID`). All extend `IdempotencyError` (`code`, `status`, `idempotencyKey`, `cause`). A key that is not 1 to 255 characters is rejected with a `TypeError` before anything is sent.
+
+```typescript
+import { IdempotencyInProgressError, connect } from 'space-node-client';
+
+const client = connect({ url: 'http://localhost:5403', apiKey: 'your-api-key', retries: 2 });
+
+// job.idempotencyKey was created (crypto.randomUUID()) and stored when the job was enqueued.
+const result = await client.features.evaluate(job.userId, 'acme-exports', { 'acme-maxExports': 1 }, {
+  idempotencyKey: job.idempotencyKey,
+});
+if (!result.eval) {
+  return; // over the limit: nothing was consumed
+}
+try {
+  await runExport(job);
+} catch (error) {
+  // Give the consumption back: exactly this one, whatever happened meanwhile.
+  await client.features.revertConsumption(job.userId, 'acme-exports', result.consumptionId!, {
+    idempotencyKey: `${job.idempotencyKey}:revert`,
+  });
+  throw error;
+}
+```
+
+With `atomic-usage-limits`, SPACE applies a consumption only if every amount fits its limit, also under concurrency; one that does not fit answers `eval: false` and consumes nothing. The `consumptionId` stays revertible for SPACE's `CONSUMPTION_RETENTION_SECONDS` (24 h by default) and keys are remembered for `IDEMPOTENCY_KEY_TTL_SECONDS` (24 h by default); after that the same key starts a new operation.
 
 ### Events
 
