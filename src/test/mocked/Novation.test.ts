@@ -529,6 +529,141 @@ describe('Novation against a mocked SPACE (S4, S5, S8)', () => {
     });
   });
 
+  describe('rejectPrivate (S8, opt-in, capability reject-private)', () => {
+    const WITH_REJECT_PRIVATE = [...ALL_CAPABILITIES, 'reject-private'];
+
+    it('Should send rejectPrivate=true on the novation when SPACE advertises reject-private', async () => {
+      space.capabilities = WITH_REJECT_PRIVATE;
+      serveContract('3:x');
+      space.route('PUT', '/contracts/user-1', {
+        status: 200,
+        body: contract('4:x'),
+        headers: { etag: '"4:x"' },
+      });
+
+      const result = await client.contracts.updateContractSubscription('user-1', SUBSCRIPTION, {
+        expectedContractVersion: '3:x',
+        keepBillingPeriod: true,
+        rejectPrivate: true,
+      });
+
+      const req = puts()[0];
+      expect(req.query.get('rejectPrivate')).toBe('true');
+      expect(req.query.get('keepBillingPeriod')).toBe('true');
+      expect(req.body).toEqual(SUBSCRIPTION);
+      expect(result.contractVersion).toBe('4:x');
+    });
+
+    it('Should check rejectPrivate alone and send no other flag', async () => {
+      space.capabilities = WITH_REJECT_PRIVATE;
+      serveContract('3:x');
+      space.route('PUT', '/contracts/user-1', { status: 200, body: contract('4:x') });
+
+      await client.contracts.updateContractSubscription('user-1', SUBSCRIPTION, {
+        rejectPrivate: true,
+      });
+
+      // One read for the capability check, then the write.
+      expect(space.requests.map(r => r.method)).toEqual(['GET', 'PUT']);
+      const req = puts()[0];
+      expect(req.query.get('rejectPrivate')).toBe('true');
+      expect(req.query.has('keepBillingPeriod')).toBe(false);
+      expect(req.headers['if-match']).toBeUndefined();
+    });
+
+    it.each([
+      ['no X-Space-Capabilities header', null],
+      ['the other capabilities only', ALL_CAPABILITIES],
+    ])(
+      'Should refuse rejectPrivate without writing when SPACE sends %s',
+      async (_label, capabilities) => {
+        space.capabilities = capabilities;
+        serveContract('3:x');
+        space.route('PUT', '/contracts/user-1', { status: 200, body: contract('4:x') });
+
+        const error = await client.contracts
+          .updateContractSubscription('user-1', SUBSCRIPTION, {
+            keepBillingPeriod: capabilities !== null,
+            rejectPrivate: true,
+          })
+          .catch(e => e);
+
+        expect(error).toBeInstanceOf(SpaceFeatureUnsupportedError);
+        expect(error.capability).toBe('reject-private');
+        expect(error.written).toBe(false);
+        expect(error.message).toContain('rejectPrivate');
+        expect(puts()).toHaveLength(0);
+      }
+    );
+
+    it('Should not send or check rejectPrivate when it is false', async () => {
+      space.route('PUT', '/contracts/user-1', { status: 200, body: contract('4:x') });
+
+      await client.contracts.updateContractSubscription('user-1', SUBSCRIPTION, {
+        rejectPrivate: false,
+      });
+
+      expect(space.requests).toHaveLength(1);
+      expect(space.lastRequest().query.has('rejectPrivate')).toBe(false);
+    });
+
+    it('Should send rejectPrivate=true on the preview when SPACE advertises reject-private', async () => {
+      space.capabilities = WITH_REJECT_PRIVATE;
+      space.route('POST', '/contracts/user-1/novation/preview', {
+        status: 200,
+        body: {
+          valid: false,
+          errors: [
+            {
+              code: 'PRIVATE_PLAN',
+              service: 'acme',
+              path: 'subscriptionPlans.acme',
+              message: 'Plan pro is private',
+            },
+          ],
+          contractVersion: '3:x',
+        },
+      });
+
+      const result = await client.contracts.previewNovation('user-1', SUBSCRIPTION, {
+        rejectPrivate: true,
+      });
+
+      const req = space.lastRequest();
+      expect(req.query.get('rejectPrivate')).toBe('true');
+      expect(req.query.has('keepBillingPeriod')).toBe(false);
+      expect(result.valid).toBe(false);
+      expect(result.errors[0].code).toBe('PRIVATE_PLAN');
+    });
+
+    it('Should refuse a rejectPrivate preview from a SPACE without reject-private', async () => {
+      space.capabilities = ALL_CAPABILITIES;
+      space.route('POST', '/contracts/user-1/novation/preview', {
+        status: 200,
+        body: { valid: true, errors: [], contractVersion: '3:x' },
+      });
+
+      const error = await client.contracts
+        .previewNovation('user-1', SUBSCRIPTION, { keepBillingPeriod: true, rejectPrivate: true })
+        .catch(e => e);
+
+      expect(error).toBeInstanceOf(SpaceFeatureUnsupportedError);
+      expect(error.capability).toBe('reject-private');
+      expect(error.written).toBe(false);
+    });
+
+    it('Should not send rejectPrivate on the preview when it is not set', async () => {
+      space.route('POST', '/contracts/user-1/novation/preview', {
+        status: 200,
+        body: { valid: true, errors: [], contractVersion: '3:x' },
+      });
+
+      await client.contracts.previewNovation('user-1', SUBSCRIPTION, { rejectPrivate: false });
+
+      expect(space.lastRequest().query.has('rejectPrivate')).toBe(false);
+    });
+  });
+
   describe('contracts.getContract', () => {
     it('Should fill contractVersion from the ETag header', async () => {
       space.route('GET', '/contracts/user-1', {

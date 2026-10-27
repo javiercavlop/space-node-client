@@ -114,9 +114,10 @@ export class ContractModule {
    *   - `expectedContractVersion`: sent as `If-Match`; a concurrent change makes SPACE answer 412
    *     and this method throw `ContractChangedError`.
    *   - `keepBillingPeriod`: keep the current billing period instead of restarting it.
+   *   - `rejectPrivate`: ask SPACE to reject private plans and add-ons (opt-in, default false).
    *
-   *   Both guarantees need server support (`X-Space-Capabilities` tokens `contract-version` and
-   *   `keep-billing-period`). Before writing, the client checks them (cached per client for
+   *   These guarantees need server support (`X-Space-Capabilities` tokens `contract-version`,
+   *   `keep-billing-period` and `reject-private`). Before writing, the client checks them (cached per client for
    *   `SpaceClient.CAPABILITIES_TTL_MS`; when unknown, it reads the contract once, which also lets it
    *   reject a stale `expectedContractVersion` early) and throws `SpaceFeatureUnsupportedError`
    *   without writing if one is missing. After writing, it throws `SpaceFeatureUnsupportedError`
@@ -198,8 +199,11 @@ export class ContractModule {
    *
    * @param userId - The ID of the user whose subscription would change.
    * @param newSubscription - The candidate subscription; `contractedServices` may be omitted.
-   * @param options - `keepBillingPeriod` to preview keeping the current billing period.
+   * @param options - `keepBillingPeriod` to preview keeping the current billing period;
+   *   `rejectPrivate` to have private plans and add-ons reported as errors.
    * @returns A promise that resolves with the preview, including the current `contractVersion`.
+   * @throws `SpaceFeatureUnsupportedError` if the answering SPACE does not advertise the
+   *   capability of a requested option (`keep-billing-period`, `reject-private`).
    * @throws An error if the operation fails (e.g. 404 contract not found).
    */
   public async previewNovation(
@@ -221,14 +225,16 @@ export class ContractModule {
       )
       .then(response => {
         this.spaceClient.observeCapabilities(response.headers);
-        if (
-          options.keepBillingPeriod &&
-          !this.spaceClient.getCachedCapabilities()?.has(KEEP_BILLING_PERIOD)
-        ) {
-          // The preview would describe a restart while the caller asked to keep the period.
+        // The preview would describe a restart, or accept private plans, while the caller asked
+        // otherwise.
+        const capabilities = this.spaceClient.getCachedCapabilities();
+        const missing = requiredCapabilities(options).find(
+          capability => !capabilities?.has(capability)
+        );
+        if (missing) {
           throw new SpaceFeatureUnsupportedError(
-            KEEP_BILLING_PERIOD,
-            'The connected SPACE does not support keepBillingPeriod: the preview ignored it'
+            missing,
+            `The connected SPACE does not support ${OPTION_OF[missing]}: the preview ignored it`
           );
         }
         return response.data;
@@ -334,9 +340,11 @@ export class ContractModule {
 
 const CONTRACT_VERSION = 'contract-version';
 const KEEP_BILLING_PERIOD = 'keep-billing-period';
+const REJECT_PRIVATE = 'reject-private';
 const OPTION_OF: Record<string, string> = {
   [CONTRACT_VERSION]: 'expectedContractVersion (If-Match)',
   [KEEP_BILLING_PERIOD]: 'keepBillingPeriod',
+  [REJECT_PRIVATE]: 'rejectPrivate',
 };
 
 function requiredCapabilities(options: UpdateContractSubscriptionOptions): string[] {
@@ -346,6 +354,9 @@ function requiredCapabilities(options: UpdateContractSubscriptionOptions): strin
   }
   if (options.keepBillingPeriod) {
     required.push(KEEP_BILLING_PERIOD);
+  }
+  if (options.rejectPrivate) {
+    required.push(REJECT_PRIVATE);
   }
   return required;
 }
@@ -387,7 +398,14 @@ function unhonouredOption(
 }
 
 function novationParams(options: NovationPreviewOptions): Record<string, string> | undefined {
-  return options.keepBillingPeriod ? { keepBillingPeriod: 'true' } : undefined;
+  const params: Record<string, string> = {};
+  if (options.keepBillingPeriod) {
+    params.keepBillingPeriod = 'true';
+  }
+  if (options.rejectPrivate) {
+    params.rejectPrivate = 'true';
+  }
+  return Object.keys(params).length > 0 ? params : undefined;
 }
 
 function toEtag(contractVersion: string): string {

@@ -88,6 +88,12 @@ export interface NovationPreviewOptions {
    * Sent as the query flag `keepBillingPeriod=true`. Default: the period restarts.
    */
   keepBillingPeriod?: boolean;
+  /**
+   * Ask SPACE to reject private plans and add-ons (codes `PRIVATE_PLAN` / `PRIVATE_ADDON`).
+   * Sent as the query flag `rejectPrivate=true` only when `true`. Default: SPACE accepts them.
+   * Needs the `reject-private` capability; without it the client refuses the call.
+   */
+  rejectPrivate?: boolean;
 }
 
 export interface UpdateContractSubscriptionOptions extends NovationPreviewOptions {
