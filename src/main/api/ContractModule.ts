@@ -1,6 +1,16 @@
 import axios from 'axios';
 import { SpaceClient } from '../config/SpaceClient';
-import { Contract, ContractPricings, ContractToCreate, Subscription } from '../types';
+import { ContractChangedError } from '../errors';
+import {
+  Contract,
+  ContractPricings,
+  ContractToCreate,
+  NovationPreview,
+  NovationPreviewOptions,
+  NovationRequest,
+  Subscription,
+  UpdateContractSubscriptionOptions,
+} from '../types';
 
 export class ContractModule {
   private spaceClient: SpaceClient;
@@ -17,7 +27,7 @@ export class ContractModule {
   /**
    * Retrieves the contract for a specific user from the Space platform.
    * This method first checks the cache before making an API request.
-   * 
+   *
    * @param userId - The ID of the user whose contract is to be retrieved.
    * @returns A promise that resolves with the user's contract data.
    * @throws An error if the operation fails.
@@ -44,12 +54,12 @@ export class ContractModule {
       })
       .then(async response => {
         const contract = response.data;
-        
+
         // Cache the result if caching is enabled
         if (cache.isEnabled()) {
           await cache.set(cacheKey, contract);
         }
-        
+
         return contract;
       })
       .catch(error => {
@@ -94,27 +104,39 @@ export class ContractModule {
   }
 
   /**
-   * Updates the subscription for a user in the Space platform.
+   * Updates the subscription for a user in the Space platform (novation).
    * This method also invalidates the cached data for the user.
    *
    * @param userId - The ID of the user whose subscription is to be updated.
    * @param newSubscription - The new subscription details to be applied.
+   * @param options - Optional novation options:
+   *   - `expectedContractVersion`: sent as `If-Match`; a concurrent change makes SPACE answer 412
+   *     and this method throw `ContractChangedError`.
+   *   - `keepBillingPeriod`: keep the current billing period instead of restarting it.
    * @returns A promise that resolves with the response data from the Space API.
+   * @throws `ContractChangedError` if `expectedContractVersion` no longer matches.
    * @throws An error if the operation fails.
    */
   public async updateContractSubscription(
     userId: string,
-    newSubscription: Subscription
+    newSubscription: Subscription,
+    options: UpdateContractSubscriptionOptions = {}
   ): Promise<Contract> {
+    const headers: Record<string, string> = {
+      'x-api-key': this.spaceClient.apiKey,
+    };
+    if (options.expectedContractVersion !== undefined) {
+      headers['If-Match'] = toEtag(options.expectedContractVersion);
+    }
+
     return axios
       .put(`${this.spaceClient.httpUrl}/contracts/${userId}`, newSubscription, {
-        headers: {
-          'x-api-key': this.spaceClient.apiKey,
-        },
+        params: novationParams(options),
+        headers,
         timeout: this.spaceClient.timeout,
       })
       .then(async response => {
-        const contract = response.data;
+        const contract = withContractVersion(response.data, response.headers['etag']);
         const cache = this.spaceClient.getCache();
 
         // Invalidate and update cache for this user if caching is enabled
@@ -125,8 +147,54 @@ export class ContractModule {
 
         return contract;
       })
+      .catch(async error => {
+        if (error.response?.status === 412) {
+          // Whatever we have cached for this user is known to be stale.
+          await this.spaceClient.getCache().invalidateUser(userId);
+          const data = error.response.data ?? {};
+          const current =
+            data.contractVersion ?? fromEtag(error.response.headers?.['etag']) ?? null;
+          throw new ContractChangedError(userId, options.expectedContractVersion, current, error);
+        }
+        console.error(
+          'Error updating contract subscription:',
+          error.response?.data ?? error.message
+        );
+        throw error;
+      });
+  }
+
+  /**
+   * Previews a novation without applying it (`POST /contracts/{userId}/novation/preview`).
+   * SPACE runs the same policy and validation as `updateContractSubscription` and writes nothing.
+   * An invalid subscription is reported as `valid: false` with `errors`, not thrown.
+   *
+   * @param userId - The ID of the user whose subscription would change.
+   * @param newSubscription - The candidate subscription; `contractedServices` may be omitted.
+   * @param options - `keepBillingPeriod` to preview keeping the current billing period.
+   * @returns A promise that resolves with the preview, including the current `contractVersion`.
+   * @throws An error if the operation fails (e.g. 404 contract not found).
+   */
+  public async previewNovation(
+    userId: string,
+    newSubscription: NovationRequest,
+    options: NovationPreviewOptions = {}
+  ): Promise<NovationPreview> {
+    return axios
+      .post(
+        `${this.spaceClient.httpUrl}/contracts/${encodeURIComponent(userId)}/novation/preview`,
+        newSubscription,
+        {
+          params: novationParams(options),
+          headers: {
+            'x-api-key': this.spaceClient.apiKey,
+          },
+          timeout: this.spaceClient.timeout,
+        }
+      )
+      .then(response => response.data)
       .catch(error => {
-        console.error('Error updating contract subscription:', error.response.data);
+        console.error('Error previewing novation:', error.response?.data ?? error.message);
         throw error;
       });
   }
@@ -155,4 +223,29 @@ export class ContractModule {
         throw error;
       });
   }
+}
+
+function novationParams(options: NovationPreviewOptions): Record<string, string> | undefined {
+  return options.keepBillingPeriod ? { keepBillingPeriod: 'true' } : undefined;
+}
+
+function toEtag(contractVersion: string): string {
+  return /^(W\/)?".*"$/.test(contractVersion) ? contractVersion : `"${contractVersion}"`;
+}
+
+function fromEtag(etag: string | undefined): string | undefined {
+  if (!etag) {
+    return undefined;
+  }
+  return etag.replace(/^W\//, '').replace(/^"(.*)"$/, '$1');
+}
+
+function withContractVersion(contract: Contract, etag: string | undefined): Contract {
+  if (contract && typeof contract === 'object' && contract.contractVersion === undefined) {
+    const fromHeader = fromEtag(etag);
+    if (fromHeader !== undefined) {
+      return { ...contract, contractVersion: fromHeader };
+    }
+  }
+  return contract;
 }

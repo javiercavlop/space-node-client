@@ -32,3 +32,26 @@ export class SpaceFeatureUnsupportedError extends Error {
     this.name = 'SpaceFeatureUnsupportedError';
   }
 }
+
+/**
+ * Thrown by `contracts.updateContractSubscription` when `expectedContractVersion` no longer matches
+ * the contract stored in SPACE (`412 {error: "CONTRACT_CHANGED"}`): someone else changed it in the
+ * meantime. Re-read the contract (or preview again) and ask the user to confirm the new situation.
+ */
+export class ContractChangedError extends Error {
+  public readonly code = 'CONTRACT_CHANGED';
+
+  constructor(
+    public readonly userId: string,
+    /** The version the caller expected. */
+    public readonly expectedContractVersion: string | undefined,
+    /** The current version in SPACE, or `null` if SPACE did not report it. */
+    public readonly contractVersion: string | null,
+    public readonly cause?: unknown
+  ) {
+    super(
+      `The contract of user ${userId} changed (expected ${expectedContractVersion ?? 'unknown'}, current ${contractVersion ?? 'unknown'})`
+    );
+    this.name = 'ContractChangedError';
+  }
+}

@@ -82,7 +82,8 @@ console.log(result.eval); // true/false
 
 - `connect({ url, apiKey })` — Connects to the SPACE server and returns a `SpaceClient` instance.
 - `SpaceClient.contracts.addContract(contract)` — Adds a new contract.
-- `SpaceClient.contracts.updateContractSubscription(userId, subscription)` — Updates a user's subscription.
+- `SpaceClient.contracts.updateContractSubscription(userId, subscription, { expectedContractVersion?, keepBillingPeriod? })` — Updates a user's subscription (novation). With `expectedContractVersion` the change only applies if nobody changed the contract meanwhile; otherwise it throws `ContractChangedError` (HTTP 412) carrying the current `contractVersion`. `keepBillingPeriod: true` keeps the current billing period instead of restarting it.
+- `SpaceClient.contracts.previewNovation(userId, subscription, { keepBillingPeriod? })` — Dry run of a novation: returns `{ valid, errors, effective, versionChanges, usageWarnings, billingPeriod, contractVersion }` and writes nothing. `contractedServices` may be omitted to let SPACE keep the versions or apply the SPHERE policy.
 - `SpaceClient.features.evaluate(userId, featureId, expectedConsumption?)` — Evaluates a feature for a user.
 - `SpaceClient.features.revertEvaluation(userId, featureId)` — Reverts the usage level update performed during a past evaluation. 
 
@@ -112,8 +113,39 @@ const refreshed = await client.pricings.getYaml('acme', current.version, { etag:
 if (!refreshed.notModified) cached = refreshed;
 ```
 
+### Changing a subscription safely
+
+```typescript
+import { ContractChangedError } from 'space-node-client';
+
+const candidate = {
+  subscriptionPlans: { acme: 'pro' },
+  subscriptionAddOns: { acme: { extraStorage: 1 } },
+};
+
+// 1. Preview: validation, effective versions, usage warnings. Nothing is written.
+const preview = await client.contracts.previewNovation('user-123', candidate, { keepBillingPeriod: true });
+if (!preview.valid) {
+  return preview.errors; // [{ code: 'ADDON_NOT_AVAILABLE', service, path, message }, ...]
+}
+
+// 2. The user confirms; apply exactly what was previewed, guarded by the version it was computed on.
+try {
+  const contract = await client.contracts.updateContractSubscription('user-123', preview.effective, {
+    expectedContractVersion: preview.contractVersion,
+    keepBillingPeriod: true,
+  });
+} catch (error) {
+  if (error instanceof ContractChangedError) {
+    // Someone changed the contract in between (error.contractVersion is the current one):
+    // preview again and ask the user to confirm.
+  }
+  throw error;
+}
+```
+
 > [!NOTE]
-> These endpoints need SPACE with the subscription-change API (`GET /contracts/{userId}/pricings`, `GET /services/{s}/pricings/{v}?format=yaml`, `GET /services/{s}/pricings/new-contracts`). Older SPACE versions answer 404 (and `getYaml` throws `SpaceFeatureUnsupportedError`).
+> These endpoints need SPACE with the subscription-change API (`GET /contracts/{userId}/pricings`, `GET /services/{s}/pricings/{v}?format=yaml`, `GET /services/{s}/pricings/new-contracts`, `POST /contracts/{userId}/novation/preview`). Older SPACE versions answer 404 to them (`getYaml` throws `SpaceFeatureUnsupportedError`) and ignore `If-Match`/`keepBillingPeriod` on `PUT /contracts/{userId}` (the novation then applies unconditionally and restarts the billing period).
 
 ### Events
 
