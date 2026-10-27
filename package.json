@@ -23,7 +23,8 @@
     "dev": "tsc --watch & tsc-alias --watch --project=\"./tsconfig.json\" --resolve-full-paths",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
-    "test": "vitest --run"
+    "test": "vitest --run",
+    "test:mocked": "vitest --run src/test/mocked"
   },
   "repository": {
     "type": "git",
@@ -62,6 +63,7 @@
     "husky": "^8.0.3",
     "js-yaml": "^4.1.0",
     "prettier": "^3.0.3",
+    "socket.io": "^4.8.1",
     "tsc-alias": "^1.8.8",
     "tsx": "^4.19.3",
     "typescript": "^5.3.3",
