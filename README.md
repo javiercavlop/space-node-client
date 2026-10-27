@@ -90,6 +90,30 @@ console.log(result.eval); // true/false
   > This will only take effect if the evaluation was done less that 2 mins ago, so it's expected to be used as rollback in case of an error during request processing in the host app
 
 - `SpaceClient.features.generateUserPricingToken(userId)` — Evaluates all features that affect a user and returns a [Pricing Token](https://pricing4saas-docs.vercel.app/docs/2.0.1/api/understanding/communication).
+- `SpaceClient.contracts.getPricings(userId)` — Returns the pricing version (plan, add-ons, status, YAML path) of every service in the user's contract, the version SPACE assigns to new contracts and the current `contractVersion`.
+- `SpaceClient.pricings.getYaml(serviceName, pricingVersion, { etag? })` — Returns the raw Pricing2Yaml file of a version, byte for byte, with its `etag` and `syntaxVersion`. With `etag`, a 304 yields `{ notModified: true, yaml: null }`. Throws `PricingYamlUnavailableError` when SPACE cannot provide the original file.
+- `SpaceClient.services.getNewContractsPricing(serviceName)` — Returns the version SPACE assigns to new contracts (`{ version, yamlUrl, source }`, `source` being `sphere-policy`, `default` or `latest-active`).
+
+### Rendering a pricing page
+
+```typescript
+import { PricingYamlUnavailableError } from 'space-node-client';
+
+// Signed-out visitor: the version new contracts get.
+const { version } = await client.services.getNewContractsPricing('acme');
+
+// Signed-in customer: the version of THEIR contract.
+const { services, contractVersion } = await client.contracts.getPricings('user-123');
+const current = services['acme']; // { version, status, plan, addOns, newContractsVersion, yamlUrl }
+
+// The Pricing2Yaml to hand to the renderer (cache it by etag).
+let cached = await client.pricings.getYaml('acme', current.version);
+const refreshed = await client.pricings.getYaml('acme', current.version, { etag: cached.etag! });
+if (!refreshed.notModified) cached = refreshed;
+```
+
+> [!NOTE]
+> These endpoints need SPACE with the subscription-change API (`GET /contracts/{userId}/pricings`, `GET /services/{s}/pricings/{v}?format=yaml`, `GET /services/{s}/pricings/new-contracts`). Older SPACE versions answer 404.
 
 ### Events
 
@@ -122,6 +146,10 @@ client.on('pricing_archived', data => {
   console.log('Pricing Version:', data.pricingVersion);
 });
 ```
+
+## Tests
+
+`pnpm test` runs the whole suite; most suites expect a SPACE instance on `http://localhost:3000` (see `src/test/lib/axios.ts`) and Redis for the Redis suite. `pnpm test:mocked` runs only the suites under `src/test/mocked`, which start an in-process HTTP and Socket.IO server that mimics SPACE and need nothing else.
 
 ## TypeScript Support
 

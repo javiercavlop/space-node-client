@@ -1,6 +1,6 @@
 import axios from 'axios';
 import { SpaceClient } from '../config/SpaceClient';
-import { Contract, ContractToCreate, Subscription } from '../types';
+import { Contract, ContractPricings, ContractToCreate, Subscription } from '../types';
 
 export class ContractModule {
   private spaceClient: SpaceClient;
@@ -127,6 +127,31 @@ export class ContractModule {
       })
       .catch(error => {
         console.error('Error updating contract subscription:', error.response.data);
+        throw error;
+      });
+  }
+
+  /**
+   * Retrieves the pricing version of every service of a user's contract, together with the
+   * version SPACE assigns to new contracts and the current `contractVersion`
+   * (`GET /contracts/{userId}/pricings`). Use it to render the pricing page of a signed-in customer
+   * with the version of THEIR contract.
+   *
+   * @param userId - The ID of the user whose contract pricings are to be retrieved.
+   * @returns A promise that resolves with the pricings of the contract.
+   * @throws An error if the operation fails (404 if the contract is not in the caller organisation).
+   */
+  public async getPricings(userId: string): Promise<ContractPricings> {
+    return axios
+      .get(`${this.spaceClient.httpUrl}/contracts/${encodeURIComponent(userId)}/pricings`, {
+        headers: {
+          'x-api-key': this.spaceClient.apiKey,
+        },
+        timeout: this.spaceClient.timeout,
+      })
+      .then(response => response.data)
+      .catch(error => {
+        console.error('Error fetching contract pricings:', error.response?.data ?? error.message);
         throw error;
       });
   }

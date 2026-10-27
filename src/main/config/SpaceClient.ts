@@ -3,6 +3,8 @@ import { io, Socket } from 'socket.io-client';
 import { ContractModule } from '../api/ContractModule';
 import { FeatureModule } from '../api/FeaturesModule';
 import { CacheModule } from '../api/CacheModule';
+import { PricingModule } from '../api/PricingModule';
+import { ServiceModule } from '../api/ServiceModule';
 import { SpaceEvent, SpaceConnectionOptions, CacheOptions } from '../types';
 
 /**
@@ -64,6 +66,16 @@ export class SpaceClient {
   public features: FeatureModule;
 
   /**
+   * An instance of the `PricingModule` class, which provides access to pricing files.
+   */
+  public pricings: PricingModule;
+
+  /**
+   * An instance of the `ServiceModule` class, which provides access to service-level information.
+   */
+  public services: ServiceModule;
+
+  /**
    * An internal instance of the `CacheModule` class, which provides caching functionality.
    * This module is not exposed publicly and can only be accessed by SpaceClient and its modules.
    */
@@ -93,6 +105,8 @@ export class SpaceClient {
     this.cache = new CacheModule(this);
     this.contracts = new ContractModule(this);
     this.features = new FeatureModule(this);
+    this.pricings = new PricingModule(this);
+    this.services = new ServiceModule(this);
 
     // Initialize cache if configured
     if (options.cache) {

@@ -27,3 +27,4 @@ export type SpaceEvent = "PRICING_CREATED" | "PRICING_ARCHIVED" | "PRICING_ACTIV
 export * from './types/contracts';
 export * from './types/features';
 export * from './types/cache';
+export * from './types/pricings';
