@@ -56,6 +56,11 @@ export class SpaceClient {
   public apiKey: string;
 
   /**
+   * The organisation sent with the `/contracts` handshake (needed for member user keys).
+   */
+  public organizationId?: string;
+
+  /**
    * The timeout duration (in milliseconds) for HTTP requests.
    * Defaults to 5000ms if not provided in the constructor options.
    */
@@ -120,6 +125,8 @@ export class SpaceClient {
    * @param options - Configuration options for the client.
    * @param options.url - The base URL for the Space API.
    * @param options.apiKey - The API key for authenticating requests.
+   * @param options.organizationId - (Optional) The organisation of a member user key (`usr_...`),
+   *   sent with the `/contracts` events handshake.
    * @param options.timeout - (Optional) The timeout duration for HTTP requests, in milliseconds.
    * @param options.cache - (Optional) Cache configuration options.
    */
@@ -132,6 +139,7 @@ export class SpaceClient {
     });
     this.pricingSocketNamespace = this.socketClient.io.socket('/pricings');
     this.apiKey = options.apiKey;
+    this.organizationId = options.organizationId;
     this.timeout = options.timeout || 5000; // Default timeout to 5000ms if not provided
     
     // Initialize modules
@@ -351,7 +359,10 @@ export class SpaceClient {
   private connectContractSocket(): void {
     if (!this.contractSocketNamespace) {
       this.contractSocketNamespace = this.socketClient.io.socket('/contracts', {
-        auth: { apiKey: this.apiKey },
+        auth:
+          this.organizationId !== undefined
+            ? { apiKey: this.apiKey, organizationId: this.organizationId }
+            : { apiKey: this.apiKey },
       });
       this.configureContractSocket(this.contractSocketNamespace);
     }

@@ -34,8 +34,8 @@ export type ContractEventCode =
 export interface ContractEventDetails {
   userId: string;
   organizationId: string;
-  /** The `contractVersion` after the change (for `contract_deleted`, the last one). */
-  contractVersion: string;
+  /** The `contractVersion` after the change; `null` for `contract_deleted` (no contract left). */
+  contractVersion: string | null;
   /** The services of the contract affected by the change. */
   services: string[];
 }

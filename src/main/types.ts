@@ -12,6 +12,13 @@ export interface SpaceConnectionOptions {
   apiKey: string;
 
   /**
+   * The organisation to act in when `apiKey` is a member user key (`usr_...`). Sent with the
+   * handshake of the authenticated `/contracts` events namespace (`{ apiKey, organizationId }`),
+   * which SPACE requires for user keys. Not needed for organisation keys.
+   */
+  organizationId?: string;
+
+  /**
    * Optional timeout for the connection in milliseconds.
    */
   timeout?: number;

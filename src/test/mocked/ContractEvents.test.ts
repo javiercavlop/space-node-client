@@ -6,6 +6,7 @@ import {
   PricingTokenPayload,
   PricingTokenSubscription,
   SpaceClient,
+  connect,
 } from '../../main/index';
 import { MockSpace } from './mockSpace';
 
@@ -23,7 +24,8 @@ function waitFor<T>(register: (resolve: (value: T) => void) => void, ms = 3000):
 
 describe('Contract events against a mocked SPACE (S6)', () => {
   const space = new MockSpace();
-  const handshakes: { apiKey?: string; header?: string }[] = [];
+  const USER_KEY = 'usr_member-key';
+  const handshakes: { apiKey?: string; organizationId?: string; header?: string }[] = [];
   let contractSockets: ServerSocket[] = [];
 
   beforeAll(async () => {
@@ -31,7 +33,16 @@ describe('Contract events against a mocked SPACE (S6)', () => {
     const nsp = space.io.of('/contracts');
     nsp.use((socket, next) => {
       const apiKey = socket.handshake.auth?.apiKey;
-      handshakes.push({ apiKey, header: socket.handshake.headers['x-api-key'] as string });
+      const organizationId = socket.handshake.auth?.organizationId;
+      handshakes.push({
+        apiKey,
+        organizationId,
+        header: socket.handshake.headers['x-api-key'] as string,
+      });
+      // Like SPACE: org keys alone; member user keys (usr_) need the organisation.
+      if (apiKey === USER_KEY) {
+        return organizationId ? next() : next(new Error('organizationId is required for user keys'));
+      }
       if (apiKey !== API_KEY) {
         return next(new Error('Invalid API key'));
       }
@@ -57,10 +68,15 @@ describe('Contract events against a mocked SPACE (S6)', () => {
     space.io.of('/contracts').emit('message', { code, details });
   }
 
-  async function connectedClient(apiKey = API_KEY, withCache = false): Promise<SpaceClient> {
+  async function connectedClient(
+    apiKey = API_KEY,
+    withCache = false,
+    organizationId?: string
+  ): Promise<SpaceClient> {
     const client = new SpaceClient({
       url: space.url,
       apiKey,
+      organizationId,
       cache: withCache ? { enabled: true, type: CacheType.BUILTIN, ttl: 300 } : undefined,
     });
     await waitFor<void>(resolve => client.on('synchronized', () => resolve()));
@@ -88,6 +104,8 @@ describe('Contract events against a mocked SPACE (S6)', () => {
       });
 
       expect(handshakes[0].apiKey).toBe(API_KEY);
+      // Org keys: the handshake carries only the key.
+      expect(handshakes[0]).not.toHaveProperty('organizationId', expect.anything());
       emitContractEvent('CONTRACT_NOVATED', details);
       expect(await received).toEqual(details);
     } finally {
@@ -210,6 +228,77 @@ describe('Contract events against a mocked SPACE (S6)', () => {
         check();
       });
       expect(contractSockets).toHaveLength(0);
+    } finally {
+      await client.close();
+    }
+  });
+
+  it('Should send organizationId in the handshake when connecting with a member user key', async () => {
+    const client = await connectedClient(USER_KEY, false, 'org-1');
+    try {
+      const received = waitFor<ContractEventDetails>(resolve =>
+        client.on('contract_created', data => resolve(data))
+      );
+      await waitFor<void>(resolve => {
+        const check = () => (contractSockets.length > 0 ? resolve() : setTimeout(check, 10));
+        check();
+      });
+
+      expect(handshakes[0]).toEqual({ apiKey: USER_KEY, organizationId: 'org-1', header: undefined });
+      const details: ContractEventDetails = {
+        userId: 'user-9',
+        organizationId: 'org-1',
+        contractVersion: '1:x',
+        services: ['acme'],
+      };
+      emitContractEvent('CONTRACT_CREATED', details);
+      expect(await received).toEqual(details);
+    } finally {
+      await client.close();
+    }
+  });
+
+  it('Should keep organizationId when the client is created with connect()', async () => {
+    const client = connect({ url: space.url, apiKey: USER_KEY, organizationId: 'org-1' });
+    try {
+      expect(client.organizationId).toBe('org-1');
+    } finally {
+      await client.close();
+    }
+  });
+
+  it('Should report a user-key handshake without organizationId through the error listener', async () => {
+    const client = await connectedClient(USER_KEY);
+    try {
+      const error = waitFor<Error>(resolve => client.on('error', e => resolve(e)));
+      client.on('contract_novated', () => undefined);
+
+      expect((await error).message).toMatch(/organizationId/);
+    } finally {
+      await client.close();
+    }
+  });
+
+  it('Should deliver contract_deleted with a null contractVersion', async () => {
+    const client = await connectedClient();
+    try {
+      const received = waitFor<ContractEventDetails>(resolve =>
+        client.on('contract_deleted', data => resolve(data))
+      );
+      await waitFor<void>(resolve => {
+        const check = () => (contractSockets.length > 0 ? resolve() : setTimeout(check, 10));
+        check();
+      });
+
+      const details: ContractEventDetails = {
+        userId: 'user-1',
+        organizationId: 'org-1',
+        contractVersion: null,
+        services: ['acme'],
+      };
+      emitContractEvent('CONTRACT_DELETED', details);
+      expect((await received).contractVersion).toBeNull();
+      expectTypeOf<ContractEventDetails['contractVersion']>().toEqualTypeOf<string | null>();
     } finally {
       await client.close();
     }

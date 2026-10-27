@@ -80,7 +80,7 @@ console.log(result.eval); // true/false
 
 ### SpaceClient
 
-- `connect({ url, apiKey })` — Connects to the SPACE server and returns a `SpaceClient` instance.
+- `connect({ url, apiKey, organizationId? })` — Connects to the SPACE server and returns a `SpaceClient` instance. `organizationId` is only needed for member user keys (`usr_...`) and is sent with the `/contracts` events handshake.
 - `SpaceClient.contracts.addContract(contract)` — Adds a new contract.
 - `SpaceClient.contracts.updateContractSubscription(userId, subscription, { expectedContractVersion?, keepBillingPeriod?, rejectPrivate? })` — Updates a user's subscription (novation). On a SPACE that supports them (`X-Space-Capabilities` lists `contract-version` / `keep-billing-period` / `reject-private`): with `expectedContractVersion` the change only applies if nobody changed the contract meanwhile, otherwise it throws `ContractChangedError` (HTTP 412, or earlier if the contract read before the write already shows another version) carrying the current `contractVersion`; `keepBillingPeriod: true` keeps the current billing period instead of restarting it; `rejectPrivate: true` (opt-in, sent as `?rejectPrivate=true`) makes SPACE reject private plans and add-ons (`PRIVATE_PLAN` / `PRIVATE_ADDON`) instead of accepting them, which is what SPACE does by default. If the connected SPACE does not support a requested option, the call throws `SpaceFeatureUnsupportedError` (`capability`, `written: false`) and writes nothing; if the response shows the option was not honoured anyway (no `ETag`, or the billing period restarted), it throws `SpaceFeatureUnsupportedError` with `written: true` and the stored `contract`. Without options, the request is the same as before and no check is made.
 - `SpaceClient.contracts.previewNovation(userId, subscription, { keepBillingPeriod?, rejectPrivate? })` — Dry run of a novation: returns `{ valid, errors, effective, versionChanges, usageWarnings, billingPeriod, contractVersion }` and writes nothing. `contractedServices` may be omitted to let SPACE keep the versions or apply the SPHERE policy. With `keepBillingPeriod` or `rejectPrivate`, throws `SpaceFeatureUnsupportedError` if the SPACE that answered does not advertise `keep-billing-period` or `reject-private`.
@@ -193,13 +193,14 @@ client.on('pricing_archived', data => {
 
 #### Contract events
 
-Contract events travel over the authenticated `/contracts` namespace of SPACE, which only delivers the events of the organisation your API key belongs to. The client opens it (with `auth: { apiKey }`) the first time you register a contract listener, so apps that do not listen to contract events keep a single unauthenticated connection. A rejected key is reported through the `error` listener. Before calling your listener, the client invalidates its cached contract, evaluations and pricing token for that user.
+Contract events travel over the authenticated `/contracts` namespace of SPACE, which only delivers the events of the organisation your API key belongs to. The client opens it the first time you register a contract listener, with `auth: { apiKey }` for an organisation key, or `auth: { apiKey, organizationId }` when you pass `organizationId` to `connect`/`new SpaceClient` (required by SPACE for member user keys, `usr_...`), so apps that do not listen to contract events keep a single unauthenticated connection. A rejected key is reported through the `error` listener. Before calling your listener, the client invalidates its cached contract, evaluations and pricing token for that user.
 
 ```typescript
 import type { ContractEventDetails } from 'space-node-client';
 
 client.on('contract_novated', (data: ContractEventDetails) => {
   // { userId, organizationId, contractVersion, services: string[] }
+  // contractVersion is a string, or null for contract_deleted.
   notifyBrowserSessions(data.userId); // e.g. push a fresh pricing token to the user's tabs
 });
 ```
@@ -215,6 +216,8 @@ client.on('contract_novated', (data: ContractEventDetails) => {
 import type { PricingTokenPayload } from 'space-node-client';
 
 const token = await client.features.generateUserPricingToken('user-123');
+// Decoded, NOT verified: fine for reading your own freshly issued token. To trust a token that came
+// back from a browser, verify its signature (e.g. with a JWT library and SPACE's signing secret).
 const payload = JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString()) as PricingTokenPayload;
 payload.subscription?.subscriptionPlans.acme; // 'pro'
 ```
