@@ -51,6 +51,7 @@
   "dependencies": {
     "axios": "^1.9.0",
     "form-data": "^4.0.2",
+    "jose": "^6.2.12",
     "redis": "^5.5.6",
     "socket.io-client": "^4.8.1"
   },
