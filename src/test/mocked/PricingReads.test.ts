@@ -1,5 +1,10 @@
 import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';
-import { connect, SpaceClient, PricingYamlUnavailableError } from '../../main/index';
+import {
+  connect,
+  SpaceClient,
+  PricingYamlUnavailableError,
+  SpaceFeatureUnsupportedError,
+} from '../../main/index';
 import { MockSpace } from './mockSpace';
 
 const API_KEY = 'test-org-key';
@@ -111,7 +116,9 @@ describe('Pricing reads against a mocked SPACE (S2, S3, S13)', () => {
 
       const error = await client.pricings.getYaml('acme', '1.0.0').catch(e => e);
 
-      expect(error).toBeInstanceOf(Error);
+      expect(error).toBeInstanceOf(SpaceFeatureUnsupportedError);
+      expect(error.code).toBe('SPACE_FEATURE_UNSUPPORTED');
+      expect(error.capability).toBe('pricing-yaml');
       expect(error.message).toMatch(/format=yaml/);
     });
 

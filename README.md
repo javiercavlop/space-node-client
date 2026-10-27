@@ -91,7 +91,7 @@ console.log(result.eval); // true/false
 
 - `SpaceClient.features.generateUserPricingToken(userId)` — Evaluates all features that affect a user and returns a [Pricing Token](https://pricing4saas-docs.vercel.app/docs/2.0.1/api/understanding/communication).
 - `SpaceClient.contracts.getPricings(userId)` — Returns the pricing version (plan, add-ons, status, YAML path) of every service in the user's contract, the version SPACE assigns to new contracts and the current `contractVersion`.
-- `SpaceClient.pricings.getYaml(serviceName, pricingVersion, { etag? })` — Returns the raw Pricing2Yaml file of a version, byte for byte, with its `etag` and `syntaxVersion`. With `etag`, a 304 yields `{ notModified: true, yaml: null }`. Throws `PricingYamlUnavailableError` when SPACE cannot provide the original file.
+- `SpaceClient.pricings.getYaml(serviceName, pricingVersion, { etag? })` — Returns the raw Pricing2Yaml file of a version, byte for byte, with its `etag` and `syntaxVersion`. With `etag`, a 304 yields `{ notModified: true, yaml: null }`. Throws `PricingYamlUnavailableError` when SPACE cannot provide the original file, and `SpaceFeatureUnsupportedError` (`capability: 'pricing-yaml'`) when an older SPACE ignores `format=yaml` and answers with JSON.
 - `SpaceClient.services.getNewContractsPricing(serviceName)` — Returns the version SPACE assigns to new contracts (`{ version, yamlUrl, source }`, `source` being `sphere-policy`, `default` or `latest-active`).
 
 ### Rendering a pricing page
@@ -113,7 +113,7 @@ if (!refreshed.notModified) cached = refreshed;
 ```
 
 > [!NOTE]
-> These endpoints need SPACE with the subscription-change API (`GET /contracts/{userId}/pricings`, `GET /services/{s}/pricings/{v}?format=yaml`, `GET /services/{s}/pricings/new-contracts`). Older SPACE versions answer 404.
+> These endpoints need SPACE with the subscription-change API (`GET /contracts/{userId}/pricings`, `GET /services/{s}/pricings/{v}?format=yaml`, `GET /services/{s}/pricings/new-contracts`). Older SPACE versions answer 404 (and `getYaml` throws `SpaceFeatureUnsupportedError`).
 
 ### Events
 

@@ -1,6 +1,6 @@
 import axios from 'axios';
 import { SpaceClient } from '../config/SpaceClient';
-import { PricingYamlUnavailableError } from '../errors';
+import { PricingYamlUnavailableError, SpaceFeatureUnsupportedError } from '../errors';
 import { GetPricingYamlOptions, PricingYaml } from '../types';
 
 export class PricingModule {
@@ -27,6 +27,8 @@ export class PricingModule {
    * @param options - Optional `etag` for a conditional request.
    * @returns A promise that resolves with the YAML, its ETag and its syntax version.
    * @throws `PricingYamlUnavailableError` if SPACE cannot provide the original file.
+   * @throws `SpaceFeatureUnsupportedError` (capability `pricing-yaml`) if SPACE ignores
+   *   `format=yaml` and answers with the JSON pricing (SPACE without S2).
    * @throws The underlying Axios error for any other failure (e.g. 404 unknown version).
    */
   public async getYaml(
@@ -72,7 +74,8 @@ export class PricingModule {
         const contentType = String(response.headers['content-type'] ?? '');
         if (contentType.includes('application/json')) {
           // SPACE versions without S2 ignore `format=yaml` and return the parsed pricing.
-          throw new Error(
+          throw new SpaceFeatureUnsupportedError(
+            'pricing-yaml',
             `SPACE returned JSON for ${serviceName}@${pricingVersion}: this SPACE version does not support format=yaml`
           );
         }
@@ -85,6 +88,9 @@ export class PricingModule {
         };
       })
       .catch(error => {
+        if (error instanceof SpaceFeatureUnsupportedError) {
+          throw error;
+        }
         if (
           error.response?.status === 404 &&
           readErrorCode(error.response.data) === 'PRICING_YAML_UNAVAILABLE'
