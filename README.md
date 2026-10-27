@@ -213,14 +213,29 @@ client.on('contract_novated', (data: ContractEventDetails) => {
 `PricingTokenPayload` types the decoded pricing token. Tokens issued by SPACE versions with the subscription-change API also carry `subscription` (the contracted versions, plans, add-ons and the `contractVersion` at issue time); it is optional so older tokens still type-check.
 
 ```typescript
-import type { PricingTokenPayload } from 'space-node-client';
+import { pricingTokenUserId, type PricingTokenPayload } from 'space-node-client';
 
 const token = await client.features.generateUserPricingToken('user-123');
 // Decoded, NOT verified: fine for reading your own freshly issued token. To trust a token that came
 // back from a browser, verify its signature (e.g. with a JWT library and SPACE's signing secret).
 const payload = JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString()) as PricingTokenPayload;
 payload.subscription?.subscriptionPlans.acme; // 'pro'
+pricingTokenUserId(payload); // 'user-123'
 ```
+
+#### Token claims: `userId`, `organizationId`, `aud`, `iss`
+
+A `userId` is unique only within its organization, so SPACE versions with per-organization userIds (capability `contract-userid-per-org`) issue tokens with:
+
+| Claim | Value |
+| --- | --- |
+| `sub` | `urn:space:<organizationId>:<percent-encoded userId>`. Opaque: do not parse it. |
+| `userId` | The userId as stored in SPACE (not encoded). |
+| `organizationId` | The organization of the contract. |
+| `aud` | The organization the token is for (same value as `organizationId`). |
+| `iss` | The SPACE server: its `JWT_ISSUER`, `space` by default. |
+
+Tokens of older SPACE versions only have the bare userId in `sub`, so the new claims are optional in `PricingTokenPayload`. `pricingTokenUserId(payload)` returns the `userId` claim, and falls back to `sub` only when the token has no `userId` claim (an older server); it never parses the URN. Code that used `payload.sub` as the userId should switch to it. When a token is checked on the server side, also compare `organizationId` (or `aud`) with your organization: the same userId can exist in another organization of the same SPACE.
 
 ## Tests
 
