@@ -166,9 +166,13 @@ These are the events that can be listened:
 - `pricing_actived` — Emitted when a pricing's availability has changed from archived to actived.
 - `pricing_archived` — Emitted when a pricing's availability has changed from actived to archived.
 - `service_disabled` — Emitted when a service is disabled in SPACE.
+- `contract_created` — Emitted when a contract of your organisation is created.
+- `contract_novated` — Emitted when a contract of your organisation changes subscription (novation).
+- `contract_deleted` — Emitted when a contract of your organisation is deleted.
+- `contract_renewed` — Emitted when a contract of your organisation renews its billing period.
 - `error` - Emitted when an error during the connection with SPACE.
 
-All events, except `synchronized` and `error`, brings a data object with the following structure:
+The pricing events (`pricing_*`, `service_disabled`) bring a data object with the following structure:
 
 ```typescript
 {
@@ -185,6 +189,34 @@ client.on('pricing_archived', data => {
   console.log('Service Name:', data.serviceName);
   console.log('Pricing Version:', data.pricingVersion);
 });
+```
+
+#### Contract events
+
+Contract events travel over the authenticated `/contracts` namespace of SPACE, which only delivers the events of the organisation your API key belongs to. The client opens it (with `auth: { apiKey }`) the first time you register a contract listener, so apps that do not listen to contract events keep a single unauthenticated connection. A rejected key is reported through the `error` listener. Before calling your listener, the client invalidates its cached contract, evaluations and pricing token for that user.
+
+```typescript
+import type { ContractEventDetails } from 'space-node-client';
+
+client.on('contract_novated', (data: ContractEventDetails) => {
+  // { userId, organizationId, contractVersion, services: string[] }
+  notifyBrowserSessions(data.userId); // e.g. push a fresh pricing token to the user's tabs
+});
+```
+
+> [!NOTE]
+> Contract events need SPACE with the `/contracts` events namespace. Older versions reject the namespace and the `error` listener receives the connection error; pricing events are unaffected.
+
+### Pricing token payload
+
+`PricingTokenPayload` types the decoded pricing token. Tokens issued by SPACE versions with the subscription-change API also carry `subscription` (the contracted versions, plans, add-ons and the `contractVersion` at issue time); it is optional so older tokens still type-check.
+
+```typescript
+import type { PricingTokenPayload } from 'space-node-client';
+
+const token = await client.features.generateUserPricingToken('user-123');
+const payload = JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString()) as PricingTokenPayload;
+payload.subscription?.subscriptionPlans.acme; // 'pro'
 ```
 
 ## Tests

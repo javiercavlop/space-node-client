@@ -5,7 +5,22 @@ import { FeatureModule } from '../api/FeaturesModule';
 import { CacheModule } from '../api/CacheModule';
 import { PricingModule } from '../api/PricingModule';
 import { ServiceModule } from '../api/ServiceModule';
-import { SpaceEvent, SpaceConnectionOptions, CacheOptions } from '../types';
+import {
+  SpaceEvent,
+  SpaceConnectionOptions,
+  CacheOptions,
+  ContractEventDetails,
+  ContractEventName,
+  PricingEventDetails,
+  PricingEventName,
+} from '../types';
+
+const CONTRACT_EVENTS: ContractEventName[] = [
+  'contract_created',
+  'contract_novated',
+  'contract_deleted',
+  'contract_renewed',
+];
 
 /**
  * The `SpaceClient` class provides an interface to interact with the Space API and WebSocket services.
@@ -27,7 +42,13 @@ export class SpaceClient {
   /**
    * The WebSocket namespace specifically for pricing-related events.
    */
-  private pricingSocketNamespace: Socket; 
+  private pricingSocketNamespace: Socket;
+
+  /**
+   * The authenticated WebSocket namespace for contract events of the caller's organisation.
+   * It is only opened once a listener for a contract event is registered.
+   */
+  private contractSocketNamespace: Socket | null = null;
 
   /**
    * The API key used for authenticating requests to the Space API.
@@ -57,6 +78,7 @@ export class SpaceClient {
       'pricing_archived',
       'pricing_actived',
       'service_disabled',
+      ...CONTRACT_EVENTS,
       'error',
     ];
 
@@ -144,13 +166,26 @@ export class SpaceClient {
    * 
    * @param event - The name of the event to listen for. Supported events are:
    *   - `'synchronized'`: Triggered when the WebSocket connection is successfully established.
-   *   - `'pricing_change'`: Triggered when there is a change in pricing data.
-   *   - `'error'`: Triggered when a connection error occurs.
+   *   - `'pricing_created'`, `'pricing_archived'`, `'pricing_actived'`, `'service_disabled'`:
+   *     Triggered when there is a change in pricing data.
+   *   - `'contract_created'`, `'contract_novated'`, `'contract_deleted'`, `'contract_renewed'`:
+   *     Triggered when a contract of the API key's organisation changes. Registering the first of
+   *     these listeners opens the authenticated `/contracts` namespace. Cached data of the affected
+   *     user is invalidated before the callback runs.
+   *   - `'error'`: Triggered when a connection error occurs (including a rejected API key on the
+   *     `/contracts` namespace).
    * @param callback - The function to execute when the event is triggered.
    */
+  public on(event: ContractEventName, callback: (data: ContractEventDetails) => void): void;
+  public on(event: PricingEventName, callback: (data: PricingEventDetails) => void): void;
+  public on(event: string, callback: (data?: any) => void): void;
   public on(event: string, callback: (data?: any) => void): void {
-    if (this.validEvents.includes(event.toLowerCase())) {
-      this.callBackFunctions[event.toLowerCase()] = callback;
+    const name = event.toLowerCase();
+    if (this.validEvents.includes(name)) {
+      this.callBackFunctions[name] = callback;
+      if (isContractEvent(name)) {
+        this.connectContractSocket();
+      }
     } else {
       console.warn(`No handler for event: ${event}`);
     }
@@ -159,6 +194,9 @@ export class SpaceClient {
   public removeListener(event: string): void {
     if (this.validEvents.includes(event.toLowerCase())) {
       delete this.callBackFunctions[event.toLowerCase()];
+      if (!this.hasContractListeners()) {
+        this.disconnectContractSocket();
+      }
     } else {
       console.warn(`No handler to remove for event: ${event}`);
     }
@@ -168,6 +206,7 @@ export class SpaceClient {
     for (const event of this.validEvents) {
       delete this.callBackFunctions[event];
     }
+    this.disconnectContractSocket();
   }
 
   /**
@@ -178,13 +217,17 @@ export class SpaceClient {
     if (!this.pricingSocketNamespace.connected) {
       this.pricingSocketNamespace.connect();
     }
+    if (this.hasContractListeners()) {
+      this.connectContractSocket();
+    }
   }
 
   /**
-   * Disconnects from the pricing WebSocket namespace and removes all event listeners.
-   * If already disconnected, this method does nothing.
+   * Disconnects from the pricing (and, if open, contracts) WebSocket namespaces and removes all
+   * event listeners. If already disconnected, this method does nothing.
    */
   public disconnect(): void {
+    this.disconnectContractSocket();
     if (this.pricingSocketNamespace.connected) {
       this.pricingSocketNamespace.disconnect();
       this.pricingSocketNamespace.removeAllListeners();
@@ -300,6 +343,67 @@ export class SpaceClient {
       }
     });
   }
+
+  /**
+   * Opens the authenticated `/contracts` namespace (creating and wiring it on first use).
+   * @private
+   */
+  private connectContractSocket(): void {
+    if (!this.contractSocketNamespace) {
+      this.contractSocketNamespace = this.socketClient.io.socket('/contracts', {
+        auth: { apiKey: this.apiKey },
+      });
+      this.configureContractSocket(this.contractSocketNamespace);
+    }
+    if (!this.contractSocketNamespace.connected && !this.contractSocketNamespace.active) {
+      this.contractSocketNamespace.connect();
+    }
+  }
+
+  /**
+   * Closes the `/contracts` namespace, keeping its handlers so that it can be reopened.
+   * @private
+   */
+  private disconnectContractSocket(): void {
+    if (this.contractSocketNamespace) {
+      this.contractSocketNamespace.disconnect();
+    }
+  }
+
+  private hasContractListeners(): boolean {
+    return CONTRACT_EVENTS.some(event => this.callBackFunctions[event] !== undefined);
+  }
+
+  /**
+   * Dispatches contract events to their callbacks, invalidating the cached data of the affected
+   * user first so that callbacks reading the contract or a pricing token get fresh data.
+   * @private
+   */
+  private configureContractSocket(socket: Socket) {
+    socket.on('message', async data => {
+      const event = String(data?.code ?? '').toLowerCase();
+      const details: ContractEventDetails | undefined = data?.details;
+
+      if (details?.userId) {
+        await this.cache.invalidateUser(details.userId);
+      }
+
+      const callback = this.callBackFunctions[event];
+      if (callback && isContractEvent(event)) {
+        callback(details);
+      }
+    });
+
+    socket.on('connect_error', error => {
+      if (this.callBackFunctions['error']) {
+        this.callBackFunctions['error'](error);
+      }
+    });
+  }
+}
+
+function isContractEvent(event: string): event is ContractEventName {
+  return (CONTRACT_EVENTS as string[]).includes(event);
 }
 
 function readHeader(headers: unknown, name: string): string | undefined {
