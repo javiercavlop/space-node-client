@@ -1,4 +1,5 @@
 import { CacheOptions } from './types/cache';
+import { EventDeduplicationOptions } from './types/events';
 
 export interface SpaceConnectionOptions {
   /**
@@ -27,6 +28,13 @@ export interface SpaceConnectionOptions {
    * Optional cache configuration
    */
   cache?: CacheOptions;
+
+  /**
+   * Drops repeated SPACE events by `eventId` (a consumer can receive one event more than once).
+   * On by default, remembering the last 10,000 ids for up to 10 minutes; `false` turns it off.
+   * Events without `eventId` (older SPACE) are always delivered.
+   */
+  eventDeduplication?: EventDeduplicationOptions | false;
 }
 
 export type SpaceEvent =

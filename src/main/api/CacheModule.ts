@@ -203,6 +203,27 @@ export class CacheModule {
   }
 
   /**
+   * Invalidate the cache entries of every user (contracts, evaluations, subscriptions, pricing
+   * tokens), e.g. after contract events may have been missed.
+   */
+  async invalidateAllUsers(): Promise<void> {
+    if (!this.isEnabled()) {
+      return;
+    }
+
+    try {
+      for (const pattern of ['contract:*', 'feature:*', 'subscription:*', 'pricing-token:*']) {
+        const keys = await this.keys(pattern);
+        for (const key of keys) {
+          await this.delete(key);
+        }
+      }
+    } catch (error) {
+      console.error('[CacheModule] Error invalidating users cache:', error);
+    }
+  }
+
+  /**
    * Close the cache connection and cleanup resources
    * This method is internal and should only be called by SpaceClient
    */

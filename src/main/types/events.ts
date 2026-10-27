@@ -18,7 +18,11 @@ export type ContractEventName =
   | 'contract_deleted'
   | 'contract_renewed';
 
-export type ConnectionEventName = 'synchronized' | 'error';
+/**
+ * Connection events: `synchronized` (the `/pricings` namespace connected), `resync` (a namespace
+ * connected or reconnected; see `ResyncInfo`) and `error`.
+ */
+export type ConnectionEventName = 'synchronized' | 'resync' | 'error';
 
 export type SpaceClientEventName = ConnectionEventName | PricingEventName | ContractEventName;
 
@@ -46,4 +50,54 @@ export interface ContractEventDetails {
 export interface PricingEventDetails {
   serviceName: string;
   pricingVersion?: string;
+}
+
+/**
+ * Top-level fields of a SPACE event other than `details`, passed to every pricing and contract
+ * listener as its second argument.
+ *
+ * `eventId` and `occurredAt` are sent by SPACE versions with the `contract-event-ids` capability
+ * and are `undefined` with older ones.
+ */
+export interface SpaceEventMeta {
+  /** The event code as sent by SPACE, e.g. `CONTRACT_NOVATED`. */
+  code: string;
+  /**
+   * Identifies the event: every copy of one event has the same `eventId`. The client already drops
+   * repeats it has seen (see `SpaceConnectionOptions.eventDeduplication`). Compare it for equality
+   * only, never to order events.
+   */
+  eventId?: string;
+  /**
+   * When SPACE stored the change, parsed from `rawOccurredAt`; `undefined` if it is missing or
+   * not a valid date. It comes from the clock of the SPACE instance, so do not use it to order
+   * events from different instances.
+   */
+  occurredAt?: Date;
+  /** `occurredAt` exactly as SPACE sent it (ISO 8601, UTC, milliseconds). */
+  rawOccurredAt?: string;
+}
+
+/**
+ * Data passed to `resync` listeners. SPACE does not store or replay events, so whatever happened
+ * while a namespace was disconnected is lost: re-read the contracts you hold (compare their
+ * `contractVersion`) when this fires.
+ */
+export interface ResyncInfo {
+  /** The namespace that connected: `contracts` (contract events) or `pricings`. */
+  namespace: 'contracts' | 'pricings';
+  /** `false` on its first connection, `true` when it connected again after being disconnected. */
+  reconnect: boolean;
+}
+
+/**
+ * Options of the per-client deduplication of SPACE events by `eventId`.
+ */
+export interface EventDeduplicationOptions {
+  /** Set to `false` to deliver every copy (default `true`). */
+  enabled?: boolean;
+  /** At most this many ids are remembered; the oldest go first (default 10,000). */
+  maxEntries?: number;
+  /** An id is forgotten this long after it was first seen, in milliseconds (default 10 minutes). */
+  windowMs?: number;
 }

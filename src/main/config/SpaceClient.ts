@@ -13,7 +13,10 @@ import {
   ContractEventName,
   PricingEventDetails,
   PricingEventName,
+  ResyncInfo,
+  SpaceEventMeta,
 } from '../types';
+import { EventIdWindow } from '../utils/EventIdWindow';
 
 const CONTRACT_EVENTS: ContractEventName[] = [
   'contract_created',
@@ -77,8 +80,22 @@ export class SpaceClient {
    */
   private capabilities: { tokens: Set<string>; seenAt: number } | null = null;
 
+  /**
+   * The `eventId`s seen recently, shared by both namespaces; `null` when deduplication is off.
+   */
+  private eventIds: EventIdWindow | null;
+
+  /**
+   * Whether each namespace has connected before, to tell a reconnection from the first connection.
+   */
+  private connectedBefore: Record<ResyncInfo['namespace'], boolean> = {
+    pricings: false,
+    contracts: false,
+  };
+
   private validEvents: string[] = [
       'synchronized',
+      'resync',
       'pricing_created',
       'pricing_archived',
       'pricing_actived',
@@ -91,7 +108,7 @@ export class SpaceClient {
    * A record of callback functions registered for specific events.
    * The keys are event names, and the values are the corresponding callback functions.
    */
-  private callBackFunctions: Record<string, (data?: any) => void> = {};
+  private callBackFunctions: Record<string, (...args: any[]) => void> = {};
 
   /**
    * An instance of the `ContractModule` class, which provides functionality for managing contracts.
@@ -129,6 +146,8 @@ export class SpaceClient {
    *   sent with the `/contracts` events handshake.
    * @param options.timeout - (Optional) The timeout duration for HTTP requests, in milliseconds.
    * @param options.cache - (Optional) Cache configuration options.
+   * @param options.eventDeduplication - (Optional) Window of the deduplication of events by
+   *   `eventId`, or `false` to turn it off.
    */
   constructor(options: SpaceConnectionOptions) {
     this.httpUrl = options.url.endsWith('/') ? options.url.slice(0, -1) + '/api/v1' : options.url + '/api/v1';
@@ -141,6 +160,9 @@ export class SpaceClient {
     this.apiKey = options.apiKey;
     this.organizationId = options.organizationId;
     this.timeout = options.timeout || 5000; // Default timeout to 5000ms if not provided
+    const dedup = options.eventDeduplication;
+    this.eventIds =
+      dedup === false || dedup?.enabled === false ? null : new EventIdWindow(dedup ?? {});
     
     // Initialize modules
     this.cache = new CacheModule(this);
@@ -180,14 +202,29 @@ export class SpaceClient {
    *     Triggered when a contract of the API key's organisation changes. Registering the first of
    *     these listeners opens the authenticated `/contracts` namespace. Cached data of the affected
    *     user is invalidated before the callback runs.
+   *   - `'resync'`: Triggered every time a namespace connects, with `{ namespace, reconnect }`.
+   *     SPACE does not replay events, so after a reconnection (`reconnect: true`) re-read the
+   *     contracts you hold. When the `contracts` namespace reconnects, the cached data of every
+   *     user is invalidated before the callback runs.
    *   - `'error'`: Triggered when a connection error occurs (including a rejected API key on the
    *     `/contracts` namespace).
+   *
+   * Pricing and contract listeners receive the event `details` and, as a second argument, a
+   * `SpaceEventMeta` with `code`, `eventId` and `occurredAt`. A repeated `eventId` is dropped
+   * (see `SpaceConnectionOptions.eventDeduplication`).
    * @param callback - The function to execute when the event is triggered.
    */
-  public on(event: ContractEventName, callback: (data: ContractEventDetails) => void): void;
-  public on(event: PricingEventName, callback: (data: PricingEventDetails) => void): void;
-  public on(event: string, callback: (data?: any) => void): void;
-  public on(event: string, callback: (data?: any) => void): void {
+  public on(
+    event: ContractEventName,
+    callback: (data: ContractEventDetails, meta: SpaceEventMeta) => void
+  ): void;
+  public on(
+    event: PricingEventName,
+    callback: (data: PricingEventDetails, meta: SpaceEventMeta) => void
+  ): void;
+  public on(event: 'resync', callback: (info: ResyncInfo) => void): void;
+  public on(event: string, callback: (data?: any, meta?: SpaceEventMeta) => void): void;
+  public on(event: string, callback: (...args: any[]) => void): void {
     const name = event.toLowerCase();
     if (this.validEvents.includes(name)) {
       this.callBackFunctions[name] = callback;
@@ -334,14 +371,19 @@ export class SpaceClient {
       if (this.callBackFunctions['synchronized']) {
         this.callBackFunctions['synchronized']();
       }
+      this.emitResync('pricings');
     });
 
     this.pricingSocketNamespace.on('message', data => {
+      const meta = this.acceptEvent(data);
+      if (!meta) {
+        return;
+      }
       const event = (data.code as SpaceEvent).toLowerCase();
       const callback = this.callBackFunctions[event];
 
       if (callback) {
-        callback(data.details);
+        callback(data.details, meta);
       }
     });
 
@@ -391,7 +433,20 @@ export class SpaceClient {
    * @private
    */
   private configureContractSocket(socket: Socket) {
+    socket.on('connect', async () => {
+      if (this.connectedBefore.contracts) {
+        // Contract events sent while disconnected are lost, so cached user data may be stale.
+        await this.cache.invalidateAllUsers();
+      }
+      this.emitResync('contracts');
+    });
+
     socket.on('message', async data => {
+      // Checked before any await, so that two copies arriving together cannot both pass.
+      const meta = this.acceptEvent(data);
+      if (!meta) {
+        return;
+      }
       const event = String(data?.code ?? '').toLowerCase();
       const details: ContractEventDetails | undefined = data?.details;
 
@@ -401,7 +456,7 @@ export class SpaceClient {
 
       const callback = this.callBackFunctions[event];
       if (callback && isContractEvent(event)) {
-        callback(details);
+        callback(details, meta);
       }
     });
 
@@ -410,6 +465,42 @@ export class SpaceClient {
         this.callBackFunctions['error'](error);
       }
     });
+  }
+
+  /**
+   * Reads the top-level fields of an event and returns them, or `null` if the event repeats an
+   * `eventId` seen in the deduplication window. Events without `eventId` are always accepted.
+   * @private
+   */
+  private acceptEvent(data: any): SpaceEventMeta | null {
+    const meta: SpaceEventMeta = { code: String(data?.code ?? '') };
+    if (typeof data?.eventId === 'string' && data.eventId !== '') {
+      if (this.eventIds && !this.eventIds.accept(data.eventId)) {
+        return null;
+      }
+      meta.eventId = data.eventId;
+    }
+    if (typeof data?.occurredAt === 'string') {
+      meta.rawOccurredAt = data.occurredAt;
+      const occurredAt = new Date(data.occurredAt);
+      if (!Number.isNaN(occurredAt.getTime())) {
+        meta.occurredAt = occurredAt;
+      }
+    }
+    return meta;
+  }
+
+  /**
+   * Calls the `resync` listener after a namespace connected.
+   * @private
+   */
+  private emitResync(namespace: ResyncInfo['namespace']): void {
+    const info: ResyncInfo = { namespace, reconnect: this.connectedBefore[namespace] };
+    this.connectedBefore[namespace] = true;
+    const callback = this.callBackFunctions['resync'];
+    if (callback) {
+      callback(info);
+    }
   }
 }
 

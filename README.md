@@ -170,6 +170,7 @@ These are the events that can be listened:
 - `contract_novated` — Emitted when a contract of your organisation changes subscription (novation).
 - `contract_deleted` — Emitted when a contract of your organisation is deleted.
 - `contract_renewed` — Emitted when a contract of your organisation renews its billing period.
+- `resync` — Emitted every time a namespace (`pricings` or `contracts`) connects, with `{ namespace, reconnect }`. See [Delivery guarantees](#delivery-guarantees).
 - `error` - Emitted when an error during the connection with SPACE.
 
 The pricing events (`pricing_*`, `service_disabled`) bring a data object with the following structure:
@@ -207,6 +208,58 @@ client.on('contract_novated', (data: ContractEventDetails) => {
 
 > [!NOTE]
 > Contract events need SPACE with the `/contracts` events namespace. Older versions reject the namespace and the `error` listener receives the connection error; pricing events are unaffected.
+
+#### Event ids and occurredAt
+
+Pricing and contract listeners get a second argument, `SpaceEventMeta`:
+
+```typescript
+import type { ContractEventDetails, SpaceEventMeta } from 'space-node-client';
+
+client.on('contract_novated', (data: ContractEventDetails, meta: SpaceEventMeta) => {
+  meta.code;          // 'CONTRACT_NOVATED'
+  meta.eventId;       // '019a2a6b-7c1e-7d3f-9b2a-5c4e8f1a2b3c', the same in every copy of the event
+  meta.occurredAt;    // Date: when SPACE stored the change
+  meta.rawOccurredAt; // '2026-10-27T10:00:00.123Z', as sent
+});
+```
+
+SPACE sends `eventId` and `occurredAt` from the version that advertises `contract-event-ids` in `X-Space-Capabilities`. With an older SPACE they are `undefined` (and so is `occurredAt` if the value is not a valid date). Listeners that take one argument keep working.
+
+#### Delivery guarantees
+
+SPACE events are hints that something changed, not a log of the changes:
+
+- **At most once per connection, no replay.** An event goes to the connections open when it is emitted. While the client is disconnected or reconnecting, events are lost, and SPACE does not resend them.
+- **Repeats are possible.** A consumer with several connections gets one copy per connection, all with the same `eventId`. The client drops a repeated `eventId` before invalidating the cache or calling your listener. It remembers the last 10,000 ids for up to 10 minutes (both namespaces share the window); events without `eventId` are always delivered. Each `SpaceClient` has its own window, so two clients (or two replicas of your backend) each get their copy, which is what each needs to refresh its own cache.
+- **No ordering.** Events may arrive in another order than the changes were stored. Never order events by `eventId` (compare it for equality only) and do not compare `occurredAt` across SPACE instances, whose clocks may differ. `contractVersion` is a hash, not a counter.
+
+So treat a contract event as a reason to re-read the contract (`client.contracts.getContract(userId)`), and compare its `contractVersion` with the one you hold: unchanged means nothing to do, and a 404 means it was deleted. A late, repeated or out-of-order event then costs one read and changes nothing.
+
+After a reconnection, re-read the contracts you hold, because anything that changed while the client was disconnected was not announced. The `resync` event tells you when. When the `contracts` namespace reconnects, the client first invalidates the cached contracts, evaluations and pricing tokens of every user, so the reads below go to SPACE:
+
+```typescript
+import type { ResyncInfo } from 'space-node-client';
+
+client.on('resync', ({ namespace, reconnect }: ResyncInfo) => {
+  // reconnect is false on the first connection of a namespace, true after a reconnection.
+  if (namespace === 'contracts' && reconnect) {
+    void refreshCachedContracts(); // e.g. getContract() for each user you hold, comparing contractVersion
+  }
+});
+```
+
+If you read contracts before the first contract listener opened the namespace, re-read them on the first `resync` too.
+
+The deduplication window is configurable, or can be turned off:
+
+```typescript
+const client = connect({
+  url: 'http://localhost:5403',
+  apiKey: 'your-api-key',
+  eventDeduplication: { maxEntries: 50_000, windowMs: 30 * 60_000 }, // or false to deliver every copy
+});
+```
 
 ### Pricing token payload
 
