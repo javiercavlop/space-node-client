@@ -10,7 +10,9 @@ import {
   NovationRequest,
   Subscription,
   UpdateContractSubscriptionOptions,
+  WriteOptions,
 } from '../types';
+import { sendKeyedWrite } from '../utils/idempotency';
 
 export class ContractModule {
   private spaceClient: SpaceClient;
@@ -73,20 +75,31 @@ export class ContractModule {
    * Adds a new contract to the Space platform, so that evaluations for the user who owns the contract can be performed.
    * This method also invalidates any cached data for the user.
    *
+   * The request carries an `Idempotency-Key` (`options.idempotencyKey`, or a new UUID v4) and is
+   * retried with it according to the client's `retries` option: on a SPACE with `idempotency-key`, a
+   * retry of a creation that succeeded is answered with the created contract instead of `409`.
+   *
    * @param contractToCreate - The contract details to be created.
+   * @param options - `idempotencyKey` of this creation (optional).
    * @returns A promise that resolves with the response data from the Space API.
    * @throws An error if the operation fails.
    */
-  public async addContract(contractToCreate: ContractToCreate): Promise<Contract> {
-    return axios
-      .post(`${this.spaceClient.httpUrl}/contracts`, contractToCreate, {
+  public async addContract(contractToCreate: ContractToCreate, options: WriteOptions = {}): Promise<Contract> {
+    return sendKeyedWrite<Contract>(
+      this.spaceClient,
+      {
+        method: 'post',
+        url: `${this.spaceClient.httpUrl}/contracts`,
+        data: contractToCreate,
         headers: {
           'x-api-key': this.spaceClient.apiKey,
         },
         timeout: this.spaceClient.timeout,
-      })
+      },
+      options.idempotencyKey
+    )
       .then(async response => {
-        const contract = response.data;
+        const contract: any = response.data;
         const cache = this.spaceClient.getCache();
 
         // Invalidate cache for this user if caching is enabled
@@ -99,7 +112,7 @@ export class ContractModule {
         return contract;
       })
       .catch(error => {
-        console.error('Error adding contract:', error.response.data);
+        console.error('Error adding contract:', error?.response?.data ?? error?.message);
         throw error;
       });
   }
@@ -115,6 +128,9 @@ export class ContractModule {
    *     and this method throw `ContractChangedError`.
    *   - `keepBillingPeriod`: keep the current billing period instead of restarting it.
    *   - `rejectPrivate`: ask SPACE to reject private plans and add-ons (opt-in, default false).
+   *   - `idempotencyKey`: the `Idempotency-Key` of this novation (default: a new UUID v4). The
+   *     request is retried with the same key (and the same `If-Match`) according to the client's
+   *     `retries` option, so a retried novation is applied at most once.
    *
    *   These guarantees need server support (`X-Space-Capabilities` tokens `contract-version`,
    *   `keep-billing-period` and `reject-private`). Before writing, the client checks them (cached per client for
@@ -142,12 +158,18 @@ export class ContractModule {
 
     const before = await this.ensureNovationSupport(userId, options);
 
-    return axios
-      .put(`${this.spaceClient.httpUrl}/contracts/${encodeURIComponent(userId)}`, newSubscription, {
+    return sendKeyedWrite<Contract>(
+      this.spaceClient,
+      {
+        method: 'put',
+        url: `${this.spaceClient.httpUrl}/contracts/${encodeURIComponent(userId)}`,
+        data: newSubscription,
         params: novationParams(options),
         headers,
         timeout: this.spaceClient.timeout,
-      })
+      },
+      options.idempotencyKey
+    )
       .then(async response => {
         this.spaceClient.observeCapabilities(response.headers);
         const contract = withContractVersion(response.data, response.headers['etag']);

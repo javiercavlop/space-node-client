@@ -703,7 +703,6 @@ describe('Novation against a mocked SPACE (S4, S5, S8)', () => {
         status: 200,
         body: { eval: true, used: null, limit: null, error: null },
       });
-      space.route('POST', `/features/${ENCODED}`, { status: 200, body: {} });
       space.route('POST', `/features/${ENCODED}/pricing-token`, {
         status: 200,
         body: { pricingToken: 'token' },
@@ -715,7 +714,9 @@ describe('Novation against a mocked SPACE (S4, S5, S8)', () => {
 
       expect(space.requests.map(r => r.path)).toEqual([
         `/features/${ENCODED}/acme-storage`,
-        `/features/${ENCODED}`,
+        // The revert goes to the feature route (it used to hit `/features/{userId}`, which
+        // evaluates every feature and reverts nothing).
+        `/features/${ENCODED}/acme-storage`,
         `/features/${ENCODED}/pricing-token`,
       ]);
       await client.getCache().invalidateUser(USER);

@@ -24,5 +24,8 @@ export function connect(options?: SpaceConnectionOptions): SpaceClient{
     apiKey: options.apiKey,
     organizationId: options.organizationId,
     timeout: options?.timeout || 5000, // Default timeout to 5000ms if not provided
+    retries: options.retries,
+    retryBaseDelayMs: options.retryBaseDelayMs,
+    retryMaxDelayMs: options.retryMaxDelayMs,
   });
 }

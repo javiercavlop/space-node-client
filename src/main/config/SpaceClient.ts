@@ -72,6 +72,21 @@ export class SpaceClient {
    */
   public static readonly CAPABILITIES_TTL_MS = 60_000;
 
+  /** Upper bound of the `retries` option. */
+  public static readonly MAX_RETRIES = 10;
+
+  /**
+   * How many times a write carrying an `Idempotency-Key` is retried (with the same key) after a
+   * network error, a `5xx` or a `409 IDEMPOTENCY_IN_PROGRESS`. Default 0.
+   */
+  public readonly retries: number;
+
+  /** Base delay of the exponential backoff between retries, in milliseconds. */
+  public readonly retryBaseDelayMs: number;
+
+  /** Longest wait before a retry, in milliseconds; a longer `Retry-After` ends the retries. */
+  public readonly retryMaxDelayMs: number;
+
   /**
    * The capabilities last seen on a SPACE response and when they were seen; `null` if unknown.
    */
@@ -129,8 +144,28 @@ export class SpaceClient {
    *   sent with the `/contracts` events handshake.
    * @param options.timeout - (Optional) The timeout duration for HTTP requests, in milliseconds.
    * @param options.cache - (Optional) Cache configuration options.
+   * @param options.retries - (Optional) Retries of writes that carry an `Idempotency-Key`, 0 to 10
+   *   (default 0).
+   * @param options.retryBaseDelayMs - (Optional) Base delay of the retry backoff (default 250 ms).
+   * @param options.retryMaxDelayMs - (Optional) Longest wait before a retry (default 10000 ms).
+   * @throws RangeError if a retry option is out of range.
    */
   constructor(options: SpaceConnectionOptions) {
+    this.retries = options.retries ?? 0;
+    this.retryBaseDelayMs = options.retryBaseDelayMs ?? 250;
+    this.retryMaxDelayMs = options.retryMaxDelayMs ?? 10_000;
+    if (!Number.isInteger(this.retries) || this.retries < 0 || this.retries > SpaceClient.MAX_RETRIES) {
+      throw new RangeError(`retries must be an integer from 0 to ${SpaceClient.MAX_RETRIES}`);
+    }
+    for (const [name, value] of [
+      ['retryBaseDelayMs', this.retryBaseDelayMs],
+      ['retryMaxDelayMs', this.retryMaxDelayMs],
+    ] as const) {
+      if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
+        throw new RangeError(`${name} must be a non-negative number of milliseconds`);
+      }
+    }
+
     this.httpUrl = options.url.endsWith('/') ? options.url.slice(0, -1) + '/api/v1' : options.url + '/api/v1';
     this.socketClient = io(options.url.replace(/^http/, 'ws'), {
       path: '/events',
@@ -288,6 +323,38 @@ export class SpaceClient {
       return null;
     }
     return this.capabilities.tokens;
+  }
+
+  /**
+   * Tells whether the connected SPACE advertises a capability token in `X-Space-Capabilities`
+   * (e.g. `idempotency-key`, `atomic-usage-limits`). Uses the capabilities seen on a response less
+   * than `CAPABILITIES_TTL_MS` ago; when there are none, reads them from `GET /healthcheck`
+   * (unauthenticated). `false` when they cannot be read.
+   *
+   * @param capability - The token to look for.
+   */
+  public async hasCapability(capability: string): Promise<boolean> {
+    let known = this.getCachedCapabilities();
+    if (!known) {
+      try {
+        const response = await axios.get(`${this.httpUrl}/healthcheck`, { timeout: this.timeout });
+        this.observeCapabilities(response.headers);
+      } catch (error: any) {
+        if (error?.response) {
+          this.observeCapabilities(error.response.headers, false);
+        }
+      }
+      known = this.getCachedCapabilities();
+    }
+    return known?.has(capability.toLowerCase()) ?? false;
+  }
+
+  /**
+   * Waits between retries. Replaceable in tests.
+   * @internal
+   */
+  sleep(ms: number): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, ms));
   }
 
   /**

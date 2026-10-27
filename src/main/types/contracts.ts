@@ -1,3 +1,5 @@
+import type { WriteOptions } from './idempotency';
+
 export interface FallbackSubscription {
   /**
    * The name of the plan to which the user will be subscribed after novation.
@@ -96,7 +98,7 @@ export interface NovationPreviewOptions {
   rejectPrivate?: boolean;
 }
 
-export interface UpdateContractSubscriptionOptions extends NovationPreviewOptions {
+export interface UpdateContractSubscriptionOptions extends NovationPreviewOptions, WriteOptions {
   /**
    * The `contractVersion` the change was computed against (from `getContract`, `getPricings` or
    * `previewNovation`). Sent as `If-Match`; if the contract changed meanwhile SPACE answers 412 and
