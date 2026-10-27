@@ -158,12 +158,11 @@ export class SpaceClient {
   /**
    * Disconnects from the pricing WebSocket namespace.
    * The listeners registered with `on()` are kept, so `connect()` resumes delivering events to them.
-   * If already disconnected, this method does nothing.
+   * A connection attempt in progress is stopped too: no further reconnection attempts are made.
    */
   public disconnect(): void {
-    if (this.pricingSocketNamespace.connected) {
-      this.pricingSocketNamespace.disconnect();
-    }
+    // Not only when connected: while SPACE is unreachable the socket is retrying, and this stops it.
+    this.pricingSocketNamespace.disconnect();
   }
 
   /**
