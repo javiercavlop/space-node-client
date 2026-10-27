@@ -21,6 +21,8 @@ export interface MockResponse {
   status: number;
   body?: any;
   headers?: Record<string, string>;
+  /** Drop the connection without answering (a network error for the client). */
+  destroy?: boolean;
 }
 
 type RouteHandler = (req: RecordedRequest) => MockResponse;
@@ -109,6 +111,11 @@ export class MockSpace {
       const response: MockResponse = route
         ? route.handler(recorded)
         : { status: 404, body: { error: `No mock for ${recorded.method} ${recorded.path}` } };
+
+      if (response.destroy) {
+        req.socket.destroy();
+        return;
+      }
 
       const headers: Record<string, string> = { ...(response.headers ?? {}) };
       if (this.capabilities !== null && headers['x-space-capabilities'] === undefined) {
