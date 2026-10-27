@@ -23,5 +23,6 @@ export function connect(options?: SpaceConnectionOptions): SpaceClient{
     url: options.url,
     apiKey: options.apiKey,
     timeout: options?.timeout || 5000, // Default timeout to 5000ms if not provided
+    cache: options.cache,
   });
 }
