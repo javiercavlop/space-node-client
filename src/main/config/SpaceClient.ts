@@ -156,13 +156,13 @@ export class SpaceClient {
   }
 
   /**
-   * Disconnects from the pricing WebSocket namespace and removes all event listeners.
+   * Disconnects from the pricing WebSocket namespace.
+   * The listeners registered with `on()` are kept, so `connect()` resumes delivering events to them.
    * If already disconnected, this method does nothing.
    */
   public disconnect(): void {
     if (this.pricingSocketNamespace.connected) {
       this.pricingSocketNamespace.disconnect();
-      this.pricingSocketNamespace.removeAllListeners();
     }
   }
 
@@ -172,6 +172,8 @@ export class SpaceClient {
    */
   public async close(): Promise<void> {
     this.disconnect();
+    // The client is not reused after close(): drop the socket handlers.
+    this.pricingSocketNamespace.removeAllListeners();
     
     if (this.cache) {
       await this.cache.close();
