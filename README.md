@@ -217,7 +217,7 @@ import { pricingTokenUserId, type PricingTokenPayload } from 'space-node-client'
 
 const token = await client.features.generateUserPricingToken('user-123');
 // Decoded, NOT verified: fine for reading your own freshly issued token. To trust a token that came
-// back from a browser, verify its signature (e.g. with a JWT library and SPACE's signing secret).
+// back from a browser, verify it (see "Verifying pricing tokens" below).
 const payload = JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString()) as PricingTokenPayload;
 payload.subscription?.subscriptionPlans.acme; // 'pro'
 pricingTokenUserId(payload); // 'user-123'
@@ -236,6 +236,38 @@ A `userId` is unique only within its organization, so SPACE versions with per-or
 | `iss` | The SPACE server: its `JWT_ISSUER`, `space` by default. |
 
 Tokens of older SPACE versions only have the bare userId in `sub`, so the new claims are optional in `PricingTokenPayload`. `pricingTokenUserId(payload)` returns the `userId` claim, and falls back to `sub` only when the token has no `userId` claim (an older server); it never parses the URN. Code that used `payload.sub` as the userId should switch to it. When a token is checked on the server side, also compare `organizationId` (or `aud`) with your organization: the same userId can exist in another organization of the same SPACE.
+
+### Verifying pricing tokens
+
+SPACE versions with the capability `pricing-token-jwks` sign pricing tokens with ES256 and publish the public keys at `GET {url}/api/v1/.well-known/jwks.json` (no API key). A token that comes back to your backend (from a browser, a queue, another service) can then be verified with public material only:
+
+```typescript
+const payload = await client.features.verifyPricingToken(token, { organizationId: 'my-org-id' });
+pricingTokenUserId(payload); // the userId, from a token SPACE signed for your organization
+```
+
+or, without a `SpaceClient` (no API key needed):
+
+```typescript
+import { PricingTokenVerifier } from 'space-node-client';
+
+const verifier = new PricingTokenVerifier({ url: 'https://space.example.com', organizationId: 'my-org-id' });
+const payload = await verifier.verify(token);
+```
+
+What is checked:
+
+- The signature is ES256 by a key of the JWKS, chosen by the token's `kid`. Any other `alg` (`HS256`, `none`, ...) is rejected, and so is a token with a `jwk`, `jku`, `x5u` or `x5c` header: keys only come from the JWKS URL of your SPACE.
+- `exp` is required and checked (`clockToleranceSeconds`, default 0, adds leeway).
+- `iss` equals `issuer` (the `JWT_ISSUER` of your SPACE, `space` by default).
+- `aud` and `organizationId` equal the expected organization. It is required: pass `organizationId` to the call, to the verifier, or to `connect`/`new SpaceClient` (the client's `organizationId` option is used when the call names none). A userId is only unique within an organization, so a valid signature alone does not tell you the token is for one of your users.
+
+The JWKS is cached for the `max-age` of its response (SPACE sends 5 minutes; 5 minutes also when there is no `Cache-Control`, none with `no-store`/`no-cache`) and fetched again when a token names a `kid` it does not know, at most once per `refetchCooldownMs` (default 30 s). Key rotations need nothing on your side. Keep one verifier (or one client) and reuse it so the cache is shared.
+
+Errors (all `PricingTokenVerificationError`, with a `code`): `PricingTokenSignatureError` (forged or tampered token), `PricingTokenExpiredError` (`expiredAt`), `PricingTokenAudienceError` (another organization), `PricingTokenIssuerError`, `PricingTokenUnknownKeyError` (`kid` not published, e.g. a removed key), and the base class with `PRICING_TOKEN_INVALID` (malformed token, wrong `alg`, forbidden header, missing claims) or `PRICING_TOKEN_JWKS_UNAVAILABLE` (the JWKS could not be fetched). A SPACE that does not publish its keys (older versions, or one running in the deprecated `PRICING_TOKEN_ALG=HS256` mode) gives `SpaceFeatureUnsupportedError` with `capability: 'pricing-token-jwks'`.
+
+> [!NOTE]
+> Verification uses [`jose`](https://github.com/panva/jose) (a dependency without dependencies of its own), which is only loaded the first time a token is verified. It needs Node.js 20 or later (the WebCrypto global); apps that never verify tokens are unaffected.
 
 ## Tests
 

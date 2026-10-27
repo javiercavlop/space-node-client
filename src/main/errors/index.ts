@@ -66,3 +66,91 @@ export class ContractChangedError extends Error {
     this.name = 'ContractChangedError';
   }
 }
+
+/** The `code` of a {@link PricingTokenVerificationError}. */
+export type PricingTokenVerificationErrorCode =
+  | 'PRICING_TOKEN_INVALID'
+  | 'PRICING_TOKEN_SIGNATURE_INVALID'
+  | 'PRICING_TOKEN_EXPIRED'
+  | 'PRICING_TOKEN_WRONG_AUDIENCE'
+  | 'PRICING_TOKEN_WRONG_ISSUER'
+  | 'PRICING_TOKEN_UNKNOWN_KID'
+  | 'PRICING_TOKEN_JWKS_UNAVAILABLE';
+
+/**
+ * Thrown by `PricingTokenVerifier.verify` (and `features.verifyPricingToken`) when a pricing token
+ * cannot be trusted. The subclasses name the usual reasons; this class itself is used for malformed
+ * tokens, algorithms other than ES256, `jwk`/`jku`/`x5u`/`x5c` headers, missing or invalid claims
+ * (`PRICING_TOKEN_INVALID`) and for a JWKS that could not be fetched
+ * (`PRICING_TOKEN_JWKS_UNAVAILABLE`).
+ */
+export class PricingTokenVerificationError extends Error {
+  constructor(
+    public readonly code: PricingTokenVerificationErrorCode,
+    message: string,
+    public readonly cause?: unknown
+  ) {
+    super(message);
+    this.name = 'PricingTokenVerificationError';
+  }
+}
+
+/** The signature does not match the published key the token names (forged or tampered token). */
+export class PricingTokenSignatureError extends PricingTokenVerificationError {
+  constructor(cause?: unknown) {
+    super('PRICING_TOKEN_SIGNATURE_INVALID', 'The pricing token signature is invalid', cause);
+    this.name = 'PricingTokenSignatureError';
+  }
+}
+
+/** The token expired (`exp`, after the configured clock tolerance). */
+export class PricingTokenExpiredError extends PricingTokenVerificationError {
+  constructor(
+    /** When the token expired, if it says so. */
+    public readonly expiredAt: Date | undefined,
+    cause?: unknown
+  ) {
+    super('PRICING_TOKEN_EXPIRED', 'The pricing token has expired', cause);
+    this.name = 'PricingTokenExpiredError';
+  }
+}
+
+/** The token was issued for another organization (`aud` or `organizationId`). */
+export class PricingTokenAudienceError extends PricingTokenVerificationError {
+  constructor(
+    /** The organization the token had to be issued for. */
+    public readonly expected: string,
+    /** The `aud` or `organizationId` the token carries (may be missing). */
+    public readonly actual: unknown,
+    cause?: unknown
+  ) {
+    super('PRICING_TOKEN_WRONG_AUDIENCE', `The pricing token was not issued for organization ${expected}`, cause);
+    this.name = 'PricingTokenAudienceError';
+  }
+}
+
+/** The token was issued by another server (`iss`). */
+export class PricingTokenIssuerError extends PricingTokenVerificationError {
+  constructor(
+    public readonly expected: string,
+    public readonly actual: unknown,
+    cause?: unknown
+  ) {
+    super('PRICING_TOKEN_WRONG_ISSUER', `The pricing token was not issued by ${expected}`, cause);
+    this.name = 'PricingTokenIssuerError';
+  }
+}
+
+/**
+ * The token names a `kid` that SPACE does not publish, even after fetching the JWKS again: a key
+ * that was removed (rotation or leaked key) or a token that SPACE did not sign.
+ */
+export class PricingTokenUnknownKeyError extends PricingTokenVerificationError {
+  constructor(
+    public readonly kid: string,
+    cause?: unknown
+  ) {
+    super('PRICING_TOKEN_UNKNOWN_KID', `SPACE does not publish the key "${kid}" of this pricing token`, cause);
+    this.name = 'PricingTokenUnknownKeyError';
+  }
+}
