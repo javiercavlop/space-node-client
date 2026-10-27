@@ -33,6 +33,11 @@ type RouteHandler = (req: RecordedRequest) => MockResponse;
 export class MockSpace {
   public readonly requests: RecordedRequest[] = [];
   public io!: SocketIOServer;
+  /**
+   * Tokens sent as `X-Space-Capabilities` on every HTTP response (S0). `null` (the default) mimics a
+   * SPACE that predates the header and sends none.
+   */
+  public capabilities: string[] | null = null;
   private server: http.Server;
   private routes: { method: string; path: string; handler: RouteHandler }[] = [];
 
@@ -71,6 +76,7 @@ export class MockSpace {
   reset(): void {
     this.routes = [];
     this.requests.length = 0;
+    this.capabilities = null;
   }
 
   lastRequest(): RecordedRequest {
@@ -105,6 +111,9 @@ export class MockSpace {
         : { status: 404, body: { error: `No mock for ${recorded.method} ${recorded.path}` } };
 
       const headers: Record<string, string> = { ...(response.headers ?? {}) };
+      if (this.capabilities !== null && headers['x-space-capabilities'] === undefined) {
+        headers['x-space-capabilities'] = this.capabilities.join(',');
+      }
       let payload: string | undefined;
       if (response.body !== undefined) {
         if (typeof response.body === 'string') {

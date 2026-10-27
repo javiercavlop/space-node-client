@@ -55,7 +55,7 @@ export class FeatureModule {
     const queryString = queryParams.length > 0 ? `?${queryParams.join("&")}` : "";
 
     return await axios
-      .post(`${this.spaceClient.httpUrl}/features/${userId}/${featureId}${queryString}`, expectedConsumption, {
+      .post(`${this.spaceClient.httpUrl}/features/${encodeURIComponent(userId)}/${featureId}${queryString}`, expectedConsumption, {
         headers: {
           'x-api-key': this.spaceClient.apiKey,
         },
@@ -98,7 +98,7 @@ export class FeatureModule {
    */
   public async revertEvaluation(userId: string, featureId: string, revertToLatest: boolean = true): Promise<boolean> {
     return await axios
-      .post(`${this.spaceClient.httpUrl}/features/${userId}?revert=true&latest=${revertToLatest}`, {}, {
+      .post(`${this.spaceClient.httpUrl}/features/${encodeURIComponent(userId)}?revert=true&latest=${revertToLatest}`, {}, {
         headers: {
           'x-api-key': this.spaceClient.apiKey,
         },
@@ -146,7 +146,7 @@ export class FeatureModule {
     }
 
     return await axios
-      .post(`${this.spaceClient.httpUrl}/features/${userId}/pricing-token`, {}, {
+      .post(`${this.spaceClient.httpUrl}/features/${encodeURIComponent(userId)}/pricing-token`, {}, {
         headers: {
           'x-api-key': this.spaceClient.apiKey,
         },

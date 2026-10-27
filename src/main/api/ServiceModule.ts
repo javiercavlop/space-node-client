@@ -34,7 +34,10 @@ export class ServiceModule {
           timeout: this.spaceClient.timeout,
         }
       )
-      .then(response => response.data)
+      .then(response => {
+        this.spaceClient.observeCapabilities(response.headers);
+        return response.data;
+      })
       .catch(error => {
         console.error(
           'Error fetching pricing for new contracts:',

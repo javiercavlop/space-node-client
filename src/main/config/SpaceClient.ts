@@ -40,6 +40,17 @@ export class SpaceClient {
    */
   public timeout: number;
 
+  /**
+   * How long the capabilities advertised by SPACE (`X-Space-Capabilities`) are trusted before the
+   * client checks them again.
+   */
+  public static readonly CAPABILITIES_TTL_MS = 60_000;
+
+  /**
+   * The capabilities last seen on a SPACE response and when they were seen; `null` if unknown.
+   */
+  private capabilities: { tokens: Set<string>; seenAt: number } | null = null;
+
   private validEvents: string[] = [
       'synchronized',
       'pricing_created',
@@ -193,6 +204,50 @@ export class SpaceClient {
   }
 
   /**
+   * Records the capabilities advertised by a SPACE response (`X-Space-Capabilities`, see S0).
+   * A successful response without the header comes from a SPACE that predates it, i.e. one that
+   * implements none of the advertised features; an error response without it is ignored (it may
+   * come from a proxy).
+   * @internal
+   */
+  observeCapabilities(headers: unknown, successful = true): void {
+    const raw = readHeader(headers, 'x-space-capabilities');
+    if (raw === undefined && !successful) {
+      return;
+    }
+    const tokens = new Set(
+      (raw ?? '')
+        .split(',')
+        .map(token => token.trim().toLowerCase())
+        .filter(Boolean)
+    );
+    this.capabilities = { tokens, seenAt: Date.now() };
+  }
+
+  /**
+   * The capabilities seen on a SPACE response less than `CAPABILITIES_TTL_MS` ago, or `null` if
+   * they have to be checked again.
+   * @internal
+   */
+  getCachedCapabilities(): ReadonlySet<string> | null {
+    if (!this.capabilities) {
+      return null;
+    }
+    if (Date.now() - this.capabilities.seenAt > SpaceClient.CAPABILITIES_TTL_MS) {
+      return null;
+    }
+    return this.capabilities.tokens;
+  }
+
+  /**
+   * Forgets the cached SPACE capabilities, so that the next call that depends on one checks it
+   * again (e.g. right after upgrading SPACE).
+   */
+  public clearCapabilities(): void {
+    this.capabilities = null;
+  }
+
+  /**
    * Get the internal cache module
    * This method is internal and should only be used by SpaceClient modules
    * @internal
@@ -245,4 +300,19 @@ export class SpaceClient {
       }
     });
   }
+}
+
+function readHeader(headers: unknown, name: string): string | undefined {
+  if (!headers || typeof headers !== 'object') {
+    return undefined;
+  }
+  const getter = (headers as { get?: unknown }).get;
+  const value =
+    typeof getter === 'function'
+      ? getter.call(headers, name)
+      : (headers as Record<string, unknown>)[name];
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  return Array.isArray(value) ? value.join(',') : String(value);
 }

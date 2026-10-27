@@ -58,6 +58,7 @@ export class PricingModule {
         }
       )
       .then(response => {
+        this.spaceClient.observeCapabilities(response.headers);
         const etag = (response.headers['etag'] as string | undefined) ?? null;
         const syntaxVersion =
           (response.headers['x-pricing-syntax-version'] as string | undefined) ?? null;

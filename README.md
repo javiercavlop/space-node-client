@@ -82,8 +82,10 @@ console.log(result.eval); // true/false
 
 - `connect({ url, apiKey })` — Connects to the SPACE server and returns a `SpaceClient` instance.
 - `SpaceClient.contracts.addContract(contract)` — Adds a new contract.
-- `SpaceClient.contracts.updateContractSubscription(userId, subscription, { expectedContractVersion?, keepBillingPeriod? })` — Updates a user's subscription (novation). With `expectedContractVersion` the change only applies if nobody changed the contract meanwhile; otherwise it throws `ContractChangedError` (HTTP 412) carrying the current `contractVersion`. `keepBillingPeriod: true` keeps the current billing period instead of restarting it.
-- `SpaceClient.contracts.previewNovation(userId, subscription, { keepBillingPeriod? })` — Dry run of a novation: returns `{ valid, errors, effective, versionChanges, usageWarnings, billingPeriod, contractVersion }` and writes nothing. `contractedServices` may be omitted to let SPACE keep the versions or apply the SPHERE policy.
+- `SpaceClient.contracts.updateContractSubscription(userId, subscription, { expectedContractVersion?, keepBillingPeriod? })` — Updates a user's subscription (novation). On a SPACE that supports them (`X-Space-Capabilities` lists `contract-version` / `keep-billing-period`): with `expectedContractVersion` the change only applies if nobody changed the contract meanwhile, otherwise it throws `ContractChangedError` (HTTP 412, or earlier if the contract read before the write already shows another version) carrying the current `contractVersion`; `keepBillingPeriod: true` keeps the current billing period instead of restarting it. If the connected SPACE does not support a requested option, the call throws `SpaceFeatureUnsupportedError` (`capability`, `written: false`) and writes nothing; if the response shows the option was not honoured anyway (no `ETag`, or the billing period restarted), it throws `SpaceFeatureUnsupportedError` with `written: true` and the stored `contract`. Without options, the request is the same as before and no check is made.
+- `SpaceClient.contracts.previewNovation(userId, subscription, { keepBillingPeriod? })` — Dry run of a novation: returns `{ valid, errors, effective, versionChanges, usageWarnings, billingPeriod, contractVersion }` and writes nothing. `contractedServices` may be omitted to let SPACE keep the versions or apply the SPHERE policy. With `keepBillingPeriod`, throws `SpaceFeatureUnsupportedError` if the SPACE that answered does not advertise `keep-billing-period`.
+- `SpaceClient.contracts.getContract(userId)` fills `contractVersion` from the `ETag` header when the body lacks it.
+- `SpaceClient.clearCapabilities()` — Forgets the cached `X-Space-Capabilities` (kept for 60 s per client), e.g. right after upgrading SPACE.
 - `SpaceClient.features.evaluate(userId, featureId, expectedConsumption?)` — Evaluates a feature for a user.
 - `SpaceClient.features.revertEvaluation(userId, featureId)` — Reverts the usage level update performed during a past evaluation. 
 
@@ -116,7 +118,7 @@ if (!refreshed.notModified) cached = refreshed;
 ### Changing a subscription safely
 
 ```typescript
-import { ContractChangedError } from 'space-node-client';
+import { ContractChangedError, SpaceFeatureUnsupportedError } from 'space-node-client';
 
 const candidate = {
   subscriptionPlans: { acme: 'pro' },
@@ -140,12 +142,16 @@ try {
     // Someone changed the contract in between (error.contractVersion is the current one):
     // preview again and ask the user to confirm.
   }
+  if (error instanceof SpaceFeatureUnsupportedError) {
+    // This SPACE cannot guarantee error.capability. error.written tells whether the novation
+    // was applied anyway (post-write check) or nothing was sent.
+  }
   throw error;
 }
 ```
 
 > [!NOTE]
-> These endpoints need SPACE with the subscription-change API (`GET /contracts/{userId}/pricings`, `GET /services/{s}/pricings/{v}?format=yaml`, `GET /services/{s}/pricings/new-contracts`, `POST /contracts/{userId}/novation/preview`). Older SPACE versions answer 404 to them (`getYaml` throws `SpaceFeatureUnsupportedError`) and ignore `If-Match`/`keepBillingPeriod` on `PUT /contracts/{userId}` (the novation then applies unconditionally and restarts the billing period).
+> These endpoints need SPACE with the subscription-change API (`GET /contracts/{userId}/pricings`, `GET /services/{s}/pricings/{v}?format=yaml`, `GET /services/{s}/pricings/new-contracts`, `POST /contracts/{userId}/novation/preview`). Older SPACE versions answer 404 to them (`getYaml` throws `SpaceFeatureUnsupportedError`). The guarantees of `expectedContractVersion` and `keepBillingPeriod` hold only on a SPACE that advertises `contract-version` and `keep-billing-period` in `X-Space-Capabilities`; against an older SPACE the client refuses those options with `SpaceFeatureUnsupportedError` instead of sending a novation the server would apply unconditionally.
 
 ### Events
 

@@ -1,6 +1,6 @@
 import axios from 'axios';
 import { SpaceClient } from '../config/SpaceClient';
-import { ContractChangedError } from '../errors';
+import { ContractChangedError, SpaceFeatureUnsupportedError } from '../errors';
 import {
   Contract,
   ContractPricings,
@@ -46,14 +46,15 @@ export class ContractModule {
 
     // If not in cache, fetch from API
     return axios
-      .get(`${this.spaceClient.httpUrl}/contracts/${userId}`, {
+      .get(`${this.spaceClient.httpUrl}/contracts/${encodeURIComponent(userId)}`, {
         headers: {
           'x-api-key': this.spaceClient.apiKey,
         },
         timeout: this.spaceClient.timeout,
       })
       .then(async response => {
-        const contract = response.data;
+        this.spaceClient.observeCapabilities(response.headers);
+        const contract = withContractVersion(response.data, response.headers['etag']);
 
         // Cache the result if caching is enabled
         if (cache.isEnabled()) {
@@ -63,7 +64,7 @@ export class ContractModule {
         return contract;
       })
       .catch(error => {
-        console.error('Error fetching contract:', error.response.data);
+        console.error('Error fetching contract:', error.response?.data ?? error.message);
         throw error;
       });
   }
@@ -113,8 +114,17 @@ export class ContractModule {
    *   - `expectedContractVersion`: sent as `If-Match`; a concurrent change makes SPACE answer 412
    *     and this method throw `ContractChangedError`.
    *   - `keepBillingPeriod`: keep the current billing period instead of restarting it.
+   *
+   *   Both guarantees need server support (`X-Space-Capabilities` tokens `contract-version` and
+   *   `keep-billing-period`). Before writing, the client checks them (cached per client for
+   *   `SpaceClient.CAPABILITIES_TTL_MS`; when unknown, it reads the contract once, which also lets it
+   *   reject a stale `expectedContractVersion` early) and throws `SpaceFeatureUnsupportedError`
+   *   without writing if one is missing. After writing, it throws `SpaceFeatureUnsupportedError`
+   *   with `written: true` if the response shows the guarantee was not honoured (no `ETag`, or the
+   *   billing period restarted).
    * @returns A promise that resolves with the response data from the Space API.
    * @throws `ContractChangedError` if `expectedContractVersion` no longer matches.
+   * @throws `SpaceFeatureUnsupportedError` if SPACE does not support a requested option.
    * @throws An error if the operation fails.
    */
   public async updateContractSubscription(
@@ -129,15 +139,29 @@ export class ContractModule {
       headers['If-Match'] = toEtag(options.expectedContractVersion);
     }
 
+    const before = await this.ensureNovationSupport(userId, options);
+
     return axios
-      .put(`${this.spaceClient.httpUrl}/contracts/${userId}`, newSubscription, {
+      .put(`${this.spaceClient.httpUrl}/contracts/${encodeURIComponent(userId)}`, newSubscription, {
         params: novationParams(options),
         headers,
         timeout: this.spaceClient.timeout,
       })
       .then(async response => {
+        this.spaceClient.observeCapabilities(response.headers);
         const contract = withContractVersion(response.data, response.headers['etag']);
         const cache = this.spaceClient.getCache();
+
+        const unhonoured = unhonouredOption(options, response.headers['etag'], contract, before);
+        if (unhonoured) {
+          // SPACE wrote the novation without the requested guarantee: report it, and do not keep
+          // anything cached for this user.
+          await cache.invalidateUser(userId);
+          throw new SpaceFeatureUnsupportedError(unhonoured.capability, unhonoured.message, {
+            written: true,
+            contract,
+          });
+        }
 
         // Invalidate and update cache for this user if caching is enabled
         if (cache.isEnabled()) {
@@ -148,6 +172,9 @@ export class ContractModule {
         return contract;
       })
       .catch(async error => {
+        if (error instanceof SpaceFeatureUnsupportedError) {
+          throw error;
+        }
         if (error.response?.status === 412) {
           // Whatever we have cached for this user is known to be stale.
           await this.spaceClient.getCache().invalidateUser(userId);
@@ -192,8 +219,24 @@ export class ContractModule {
           timeout: this.spaceClient.timeout,
         }
       )
-      .then(response => response.data)
+      .then(response => {
+        this.spaceClient.observeCapabilities(response.headers);
+        if (
+          options.keepBillingPeriod &&
+          !this.spaceClient.getCachedCapabilities()?.has(KEEP_BILLING_PERIOD)
+        ) {
+          // The preview would describe a restart while the caller asked to keep the period.
+          throw new SpaceFeatureUnsupportedError(
+            KEEP_BILLING_PERIOD,
+            'The connected SPACE does not support keepBillingPeriod: the preview ignored it'
+          );
+        }
+        return response.data;
+      })
       .catch(error => {
+        if (error instanceof SpaceFeatureUnsupportedError) {
+          throw error;
+        }
         console.error('Error previewing novation:', error.response?.data ?? error.message);
         throw error;
       });
@@ -217,12 +260,130 @@ export class ContractModule {
         },
         timeout: this.spaceClient.timeout,
       })
-      .then(response => response.data)
+      .then(response => {
+        this.spaceClient.observeCapabilities(response.headers);
+        return response.data;
+      })
       .catch(error => {
         console.error('Error fetching contract pricings:', error.response?.data ?? error.message);
         throw error;
       });
   }
+
+  /**
+   * Makes sure the connected SPACE honours the requested novation options before anything is
+   * written (S0). When the capabilities are not cached, reads the contract once: its response
+   * carries them, and its `ETag` lets a stale `expectedContractVersion` fail before the write.
+   *
+   * @returns The contract read for the check, if one was needed.
+   */
+  private async ensureNovationSupport(
+    userId: string,
+    options: UpdateContractSubscriptionOptions
+  ): Promise<Contract | undefined> {
+    const required = requiredCapabilities(options);
+    if (required.length === 0) {
+      return undefined;
+    }
+
+    let current: Contract | undefined;
+    let currentVersion: string | undefined;
+    let capabilities = this.spaceClient.getCachedCapabilities();
+    if (!capabilities) {
+      const response = await axios
+        .get(`${this.spaceClient.httpUrl}/contracts/${encodeURIComponent(userId)}`, {
+          headers: {
+            'x-api-key': this.spaceClient.apiKey,
+          },
+          timeout: this.spaceClient.timeout,
+        })
+        .catch(error => {
+          console.error(
+            'Error reading contract before novation:',
+            error.response?.data ?? error.message
+          );
+          throw error;
+        });
+      this.spaceClient.observeCapabilities(response.headers);
+      capabilities = this.spaceClient.getCachedCapabilities() ?? new Set<string>();
+      current = withContractVersion(response.data, response.headers['etag']);
+      currentVersion = fromEtag(response.headers['etag']) ?? current?.contractVersion;
+    }
+
+    const missing = required.find(capability => !capabilities.has(capability));
+    if (missing) {
+      throw new SpaceFeatureUnsupportedError(
+        missing,
+        `The connected SPACE does not support ${OPTION_OF[missing]}: nothing was written`
+      );
+    }
+
+    // Early, non-atomic check; If-Match on the PUT stays the atomic one.
+    if (
+      currentVersion !== undefined &&
+      options.expectedContractVersion !== undefined &&
+      currentVersion !== fromEtag(options.expectedContractVersion)
+    ) {
+      await this.spaceClient.getCache().invalidateUser(userId);
+      throw new ContractChangedError(userId, options.expectedContractVersion, currentVersion);
+    }
+
+    return current;
+  }
+}
+
+const CONTRACT_VERSION = 'contract-version';
+const KEEP_BILLING_PERIOD = 'keep-billing-period';
+const OPTION_OF: Record<string, string> = {
+  [CONTRACT_VERSION]: 'expectedContractVersion (If-Match)',
+  [KEEP_BILLING_PERIOD]: 'keepBillingPeriod',
+};
+
+function requiredCapabilities(options: UpdateContractSubscriptionOptions): string[] {
+  const required: string[] = [];
+  if (options.expectedContractVersion !== undefined) {
+    required.push(CONTRACT_VERSION);
+  }
+  if (options.keepBillingPeriod) {
+    required.push(KEEP_BILLING_PERIOD);
+  }
+  return required;
+}
+
+/**
+ * Post-write backstop: tells whether the stored contract shows that SPACE ignored an option.
+ * The previous start date comes from the pre-write read or, failing that, from the history entry
+ * the novation pushed (SPACE records the replaced period there).
+ */
+function unhonouredOption(
+  options: UpdateContractSubscriptionOptions,
+  etag: string | undefined,
+  contract: Contract,
+  before: Contract | undefined
+): { capability: string; message: string } | undefined {
+  if (options.expectedContractVersion !== undefined && !etag) {
+    return {
+      capability: CONTRACT_VERSION,
+      message:
+        'SPACE applied the novation without an ETag: If-Match (expectedContractVersion) was not enforced',
+    };
+  }
+  if (options.keepBillingPeriod) {
+    const previousStart =
+      before?.billingPeriod?.startDate ?? contract?.history?.[contract.history.length - 1]?.startDate;
+    const newStart = contract?.billingPeriod?.startDate;
+    if (
+      previousStart !== undefined &&
+      newStart !== undefined &&
+      new Date(previousStart).getTime() !== new Date(newStart).getTime()
+    ) {
+      return {
+        capability: KEEP_BILLING_PERIOD,
+        message: 'SPACE applied the novation but restarted the billing period (keepBillingPeriod ignored)',
+      };
+    }
+  }
+  return undefined;
 }
 
 function novationParams(options: NovationPreviewOptions): Record<string, string> | undefined {

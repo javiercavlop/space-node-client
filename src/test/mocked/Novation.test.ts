@@ -1,5 +1,11 @@
-import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';
-import { CacheType, ContractChangedError, NovationPreview, SpaceClient } from '../../main/index';
+import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest';
+import {
+  CacheType,
+  ContractChangedError,
+  NovationPreview,
+  SpaceClient,
+  SpaceFeatureUnsupportedError,
+} from '../../main/index';
 import { MockSpace } from './mockSpace';
 
 const API_KEY = 'test-org-key';
@@ -10,11 +16,17 @@ const SUBSCRIPTION = {
   subscriptionAddOns: { acme: { extraStorage: 1 } },
 };
 
-function contract(contractVersion: string, plan = 'pro') {
+const ALL_CAPABILITIES = ['contract-version', 'keep-billing-period'];
+
+function contract(
+  contractVersion: string | undefined,
+  plan = 'pro',
+  startDate = '2026-10-01T00:00:00.000Z'
+) {
   return {
     userContact: { userId: 'user-1', username: 'user1' },
     billingPeriod: {
-      startDate: '2026-10-01T00:00:00.000Z',
+      startDate,
       endDate: '2026-10-31T00:00:00.000Z',
       autoRenew: true,
       renewalDays: 30,
@@ -43,14 +55,30 @@ describe('Novation against a mocked SPACE (S4, S5, S8)', () => {
     await new Promise(resolve => setTimeout(resolve, 50));
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     space.reset();
+    client.clearCapabilities();
+    await client.getCache().invalidateUser('user-1');
+    vi.restoreAllMocks();
   });
 
   afterAll(async () => {
     await client.close();
     await space.stop();
   });
+
+  /** Serves the current contract (the pre-write check reads it when capabilities are not cached). */
+  function serveContract(contractVersion: string, startDate?: string) {
+    space.route('GET', '/contracts/user-1', {
+      status: 200,
+      body: contract(contractVersion, 'pro', startDate),
+      headers: { etag: `"${contractVersion}"` },
+    });
+  }
+
+  function puts() {
+    return space.requests.filter(r => r.method === 'PUT');
+  }
 
   describe('contracts.previewNovation (S4)', () => {
     it('Should POST the subscription to the preview endpoint and return the dry-run result', async () => {
@@ -81,6 +109,7 @@ describe('Novation against a mocked SPACE (S4, S5, S8)', () => {
     });
 
     it('Should allow omitting contractedServices and pass keepBillingPeriod as a query flag', async () => {
+      space.capabilities = ALL_CAPABILITIES;
       space.route('POST', '/contracts/user-1/novation/preview', {
         status: 200,
         body: {
@@ -108,6 +137,21 @@ describe('Novation against a mocked SPACE (S4, S5, S8)', () => {
       expect(req.query.get('keepBillingPeriod')).toBe('true');
       expect(req.body).toEqual({ subscriptionPlans: { acme: 'pro' }, subscriptionAddOns: {} });
       expect(result.billingPeriod.restarts).toBe(false);
+    });
+
+    it('Should refuse a keepBillingPeriod preview from a SPACE without keep-billing-period', async () => {
+      space.capabilities = ['novation-preview'];
+      space.route('POST', '/contracts/user-1/novation/preview', {
+        status: 200,
+        body: { valid: true, errors: [], billingPeriod: { restarts: true }, contractVersion: '3:x' },
+      });
+
+      const error = await client.contracts
+        .previewNovation('user-1', SUBSCRIPTION, { keepBillingPeriod: true })
+        .catch(e => e);
+
+      expect(error).toBeInstanceOf(SpaceFeatureUnsupportedError);
+      expect(error.capability).toBe('keep-billing-period');
     });
 
     it('Should return valid:false results (HTTP 200) instead of throwing', async () => {
@@ -157,6 +201,8 @@ describe('Novation against a mocked SPACE (S4, S5, S8)', () => {
 
       const result = await client.contracts.updateContractSubscription('user-1', SUBSCRIPTION);
 
+      // No capability check: a single request, identical to 0.3.0.
+      expect(space.requests).toHaveLength(1);
       const req = space.lastRequest();
       expect(req.body).toEqual(SUBSCRIPTION);
       expect(req.headers['if-match']).toBeUndefined();
@@ -165,6 +211,8 @@ describe('Novation against a mocked SPACE (S4, S5, S8)', () => {
     });
 
     it('Should send If-Match with the expected contract version and keepBillingPeriod', async () => {
+      space.capabilities = ALL_CAPABILITIES;
+      serveContract('3:2026-10-27T10:00:00.000Z');
       space.route('PUT', '/contracts/user-1', req => {
         expect(req.headers['if-match']).toBe('"3:2026-10-27T10:00:00.000Z"');
         return {
@@ -197,6 +245,9 @@ describe('Novation against a mocked SPACE (S4, S5, S8)', () => {
     });
 
     it('Should throw ContractChangedError with the current contractVersion on 412', async () => {
+      // The pre-write read still sees the expected version; the contract changes before the PUT.
+      space.capabilities = ALL_CAPABILITIES;
+      serveContract('3:stale');
       const cache = client.getCache();
       await cache.set(cache.getContractKey('user-1'), contract('3:stale'));
       await cache.set(cache.getPricingTokenKey('user-1'), 'stale-token');
@@ -220,6 +271,8 @@ describe('Novation against a mocked SPACE (S4, S5, S8)', () => {
     });
 
     it('Should fall back to the ETag header when the 412 body has no contractVersion', async () => {
+      space.capabilities = ALL_CAPABILITIES;
+      serveContract('6:x');
       space.route('PUT', '/contracts/user-1', {
         status: 412,
         body: { error: 'CONTRACT_CHANGED' },
@@ -235,7 +288,13 @@ describe('Novation against a mocked SPACE (S4, S5, S8)', () => {
     });
 
     it('Should not quote an expected version that already is an ETag', async () => {
-      space.route('PUT', '/contracts/user-1', { status: 200, body: contract('9:x') });
+      space.capabilities = ALL_CAPABILITIES;
+      serveContract('8:x');
+      space.route('PUT', '/contracts/user-1', {
+        status: 200,
+        body: contract('9:x'),
+        headers: { etag: '"9:x"' },
+      });
 
       await client.contracts.updateContractSubscription('user-1', SUBSCRIPTION, {
         expectedContractVersion: '"8:x"',
@@ -256,6 +315,275 @@ describe('Novation against a mocked SPACE (S4, S5, S8)', () => {
 
       expect(error).not.toBeInstanceOf(ContractChangedError);
       expect(error.response.status).toBe(400);
+    });
+  });
+  describe('capability check against older SPACE versions (S0)', () => {
+    it('Should refuse expectedContractVersion without writing when SPACE lacks contract-version', async () => {
+      // SPACE 1.7: no X-Space-Capabilities header, If-Match would be ignored.
+      serveContract('3:x');
+      space.route('PUT', '/contracts/user-1', { status: 200, body: contract(undefined) });
+
+      const error = await client.contracts
+        .updateContractSubscription('user-1', SUBSCRIPTION, { expectedContractVersion: '3:x' })
+        .catch(e => e);
+
+      expect(error).toBeInstanceOf(SpaceFeatureUnsupportedError);
+      expect(error.code).toBe('SPACE_FEATURE_UNSUPPORTED');
+      expect(error.capability).toBe('contract-version');
+      expect(error.written).toBe(false);
+      expect(puts()).toHaveLength(0);
+    });
+
+    it('Should refuse keepBillingPeriod without writing when SPACE lacks keep-billing-period', async () => {
+      serveContract('3:x');
+      space.route('PUT', '/contracts/user-1', { status: 200, body: contract(undefined) });
+
+      const error = await client.contracts
+        .updateContractSubscription('user-1', SUBSCRIPTION, { keepBillingPeriod: true })
+        .catch(e => e);
+
+      expect(error).toBeInstanceOf(SpaceFeatureUnsupportedError);
+      expect(error.capability).toBe('keep-billing-period');
+      expect(error.written).toBe(false);
+      expect(puts()).toHaveLength(0);
+    });
+
+    it('Should refuse when only one of the two required capabilities is advertised', async () => {
+      space.capabilities = ['contract-org-scope', 'contract-version'];
+      serveContract('3:x');
+
+      const error = await client.contracts
+        .updateContractSubscription('user-1', SUBSCRIPTION, {
+          expectedContractVersion: '3:x',
+          keepBillingPeriod: true,
+        })
+        .catch(e => e);
+
+      expect(error).toBeInstanceOf(SpaceFeatureUnsupportedError);
+      expect(error.capability).toBe('keep-billing-period');
+      expect(puts()).toHaveLength(0);
+    });
+
+    it('Should throw ContractChangedError early when the current ETag differs', async () => {
+      space.capabilities = ALL_CAPABILITIES;
+      serveContract('5:new');
+      const cache = client.getCache();
+      await cache.set(cache.getContractKey('user-1'), contract('4:old'));
+
+      const error = await client.contracts
+        .updateContractSubscription('user-1', SUBSCRIPTION, { expectedContractVersion: '4:old' })
+        .catch(e => e);
+
+      expect(error).toBeInstanceOf(ContractChangedError);
+      expect(error.expectedContractVersion).toBe('4:old');
+      expect(error.contractVersion).toBe('5:new');
+      expect(puts()).toHaveLength(0);
+      expect(await cache.get(cache.getContractKey('user-1'))).toBeNull();
+    });
+
+    it('Should cache the capabilities per client for a short time', async () => {
+      space.capabilities = ALL_CAPABILITIES;
+      serveContract('3:x');
+      space.route('PUT', '/contracts/user-1', {
+        status: 200,
+        body: contract('3:x'),
+        headers: { etag: '"3:x"' },
+      });
+      const options = { expectedContractVersion: '3:x' };
+      const gets = () => space.requests.filter(r => r.method === 'GET').length;
+
+      await client.contracts.updateContractSubscription('user-1', SUBSCRIPTION, options);
+      await client.contracts.updateContractSubscription('user-1', SUBSCRIPTION, options);
+      expect(gets()).toBe(1);
+
+      const now = Date.now();
+      vi.spyOn(Date, 'now').mockReturnValue(now + SpaceClient.CAPABILITIES_TTL_MS + 1);
+      await client.contracts.updateContractSubscription('user-1', SUBSCRIPTION, options);
+      expect(gets()).toBe(2);
+      expect(puts()).toHaveLength(3);
+    });
+
+    it('Should learn the capabilities from any earlier response', async () => {
+      space.capabilities = ALL_CAPABILITIES;
+      space.route('GET', '/contracts/user-1/pricings', {
+        status: 200,
+        body: { services: {}, contractVersion: '3:x' },
+      });
+      space.route('PUT', '/contracts/user-1', {
+        status: 200,
+        body: contract('4:x'),
+        headers: { etag: '"4:x"' },
+      });
+
+      await client.contracts.getPricings('user-1');
+      await client.contracts.updateContractSubscription('user-1', SUBSCRIPTION, {
+        expectedContractVersion: '3:x',
+        keepBillingPeriod: true,
+      });
+
+      expect(space.requests.map(r => `${r.method} ${r.path}`)).toEqual([
+        'GET /contracts/user-1/pricings',
+        'PUT /contracts/user-1',
+      ]);
+    });
+
+    it('Should throw after the write when the PUT response lacks the ETag (backstop)', async () => {
+      // Capabilities were cached from a newer SPACE, but this response comes from one that ignored If-Match.
+      space.capabilities = ALL_CAPABILITIES;
+      serveContract('3:x');
+      await client.contracts.getContract('user-1');
+      space.capabilities = null;
+      space.route('PUT', '/contracts/user-1', { status: 200, body: contract(undefined) });
+
+      const error = await client.contracts
+        .updateContractSubscription('user-1', SUBSCRIPTION, { expectedContractVersion: '3:x' })
+        .catch(e => e);
+
+      expect(error).toBeInstanceOf(SpaceFeatureUnsupportedError);
+      expect(error.capability).toBe('contract-version');
+      expect(error.written).toBe(true);
+      expect(error.contract.subscriptionPlans.acme).toBe('pro');
+      expect(puts()).toHaveLength(1);
+      const cache = client.getCache();
+      expect(await cache.get(cache.getContractKey('user-1'))).toBeNull();
+    });
+
+    it('Should throw after the write when keepBillingPeriod was ignored (backstop)', async () => {
+      space.capabilities = ALL_CAPABILITIES;
+      serveContract('3:x', '2026-10-01T00:00:00.000Z');
+      // The server restarted the billing period anyway.
+      space.route('PUT', '/contracts/user-1', {
+        status: 200,
+        body: contract('4:x', 'pro', '2026-10-27T12:00:00.000Z'),
+        headers: { etag: '"4:x"' },
+      });
+
+      const error = await client.contracts
+        .updateContractSubscription('user-1', SUBSCRIPTION, { keepBillingPeriod: true })
+        .catch(e => e);
+
+      expect(error).toBeInstanceOf(SpaceFeatureUnsupportedError);
+      expect(error.capability).toBe('keep-billing-period');
+      expect(error.written).toBe(true);
+    });
+
+    it('Should detect an ignored keepBillingPeriod from the history when no read was needed', async () => {
+      space.capabilities = ALL_CAPABILITIES;
+      serveContract('3:x');
+      await client.contracts.getContract('user-1');
+      const restarted = {
+        ...contract('4:x', 'pro', '2026-10-27T12:00:00.000Z'),
+        history: [
+          {
+            startDate: '2026-10-01T00:00:00.000Z',
+            endDate: '2026-10-27T12:00:00.000Z',
+            contractedServices: {},
+            subscriptionPlans: {},
+            subscriptionAddOns: {},
+          },
+        ],
+      };
+      space.route('PUT', '/contracts/user-1', {
+        status: 200,
+        body: restarted,
+        headers: { etag: '"4:x"' },
+      });
+
+      const error = await client.contracts
+        .updateContractSubscription('user-1', SUBSCRIPTION, { keepBillingPeriod: true })
+        .catch(e => e);
+
+      expect(space.requests.filter(r => r.method === 'GET')).toHaveLength(1);
+      expect(error).toBeInstanceOf(SpaceFeatureUnsupportedError);
+      expect(error.capability).toBe('keep-billing-period');
+      expect(error.written).toBe(true);
+    });
+
+    it('Should accept a kept billing period', async () => {
+      space.capabilities = ALL_CAPABILITIES;
+      serveContract('3:x');
+      const kept = {
+        ...contract('4:x'),
+        history: [
+          {
+            startDate: '2026-10-01T00:00:00.000Z',
+            endDate: '2026-10-27T12:00:00.000Z',
+            contractedServices: {},
+            subscriptionPlans: {},
+            subscriptionAddOns: {},
+          },
+        ],
+      };
+      space.route('PUT', '/contracts/user-1', {
+        status: 200,
+        body: kept,
+        headers: { etag: '"4:x"' },
+      });
+
+      const result = await client.contracts.updateContractSubscription('user-1', SUBSCRIPTION, {
+        expectedContractVersion: '3:x',
+        keepBillingPeriod: true,
+      });
+
+      expect(result.contractVersion).toBe('4:x');
+    });
+  });
+
+  describe('contracts.getContract', () => {
+    it('Should fill contractVersion from the ETag header', async () => {
+      space.route('GET', '/contracts/user-1', {
+        status: 200,
+        body: contract(undefined),
+        headers: { etag: '"2:etag"' },
+      });
+
+      const result = await client.contracts.getContract('user-1');
+
+      expect(result.contractVersion).toBe('2:etag');
+      const cache = client.getCache();
+      expect((await cache.get<any>(cache.getContractKey('user-1'))).contractVersion).toBe('2:etag');
+    });
+  });
+
+  describe('URL encoding of userId', () => {
+    const USER = 'user/1 ?é';
+    const ENCODED = encodeURIComponent(USER);
+
+    it('Should encode the userId in getContract and updateContractSubscription', async () => {
+      space.route('GET', `/contracts/${ENCODED}`, { status: 200, body: contract('1:x') });
+      space.route('PUT', `/contracts/${ENCODED}`, { status: 200, body: contract('2:x') });
+
+      await client.contracts.getContract(USER);
+      await client.contracts.updateContractSubscription(USER, SUBSCRIPTION);
+
+      expect(space.requests.map(r => `${r.method} ${r.path}`)).toEqual([
+        `GET /contracts/${ENCODED}`,
+        `PUT /contracts/${ENCODED}`,
+      ]);
+      await client.getCache().invalidateUser(USER);
+    });
+
+    it('Should encode the userId in feature evaluations and pricing tokens', async () => {
+      space.route('POST', `/features/${ENCODED}/acme-storage`, {
+        status: 200,
+        body: { eval: true, used: null, limit: null, error: null },
+      });
+      space.route('POST', `/features/${ENCODED}`, { status: 200, body: {} });
+      space.route('POST', `/features/${ENCODED}/pricing-token`, {
+        status: 200,
+        body: { pricingToken: 'token' },
+      });
+
+      await client.features.evaluate(USER, 'acme-storage', { 'acme-storage': 1 });
+      await client.features.revertEvaluation(USER, 'acme-storage');
+      await client.features.generateUserPricingToken(USER);
+
+      expect(space.requests.map(r => r.path)).toEqual([
+        `/features/${ENCODED}/acme-storage`,
+        `/features/${ENCODED}`,
+        `/features/${ENCODED}/pricing-token`,
+      ]);
+      await client.getCache().invalidateUser(USER);
     });
   });
 });
